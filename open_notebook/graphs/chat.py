@@ -85,34 +85,28 @@ def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict
             )
         )
 
-        # Bind MCP tools to the model if any are available
-        mcp_tools = _get_mcp_tools()
+        # Fetch MCP tools once and cache in state for reuse by execute_tools
+        mcp_tools = state.get("mcp_tools") or _get_mcp_tools()
         if mcp_tools:
             model = model.bind_tools(mcp_tools)
 
         ai_message = model.invoke(payload)
 
-        # Gemini returns content as list of dicts — normalize to string
-        if hasattr(ai_message, "content") and isinstance(ai_message.content, list):
-            text_parts = []
-            for part in ai_message.content:
-                if isinstance(part, dict) and "text" in part:
-                    text_parts.append(part["text"])
-                elif isinstance(part, str):
-                    text_parts.append(part)
-            if text_parts:
-                ai_message = ai_message.model_copy(update={"content": "\n".join(text_parts)})
+        # Normalize content format (e.g. Gemini returns list of parts)
+        raw_content = ai_message.content
+        normalized_content = extract_text_content(raw_content)
 
-        # If the model made tool calls, return the raw message (don't clean yet)
+        # If the model made tool calls, normalize content and cache tools in state
         if hasattr(ai_message, "tool_calls") and ai_message.tool_calls:
+            if normalized_content != raw_content:
+                ai_message = ai_message.model_copy(update={"content": normalized_content})
             return {"messages": ai_message, "mcp_tools": mcp_tools}
 
         # Clean thinking content from AI response (e.g., <think>...</think> tags)
-        content = extract_text_content(ai_message.content)
-        cleaned_content = clean_thinking_content(content)
+        cleaned_content = clean_thinking_content(normalized_content)
         cleaned_message = ai_message.model_copy(update={"content": cleaned_content})
 
-        return {"messages": cleaned_message}
+        return {"messages": cleaned_message, "mcp_tools": mcp_tools}
     except OpenNotebookError:
         raise
     except Exception as e:
@@ -140,6 +134,12 @@ def execute_tools(state: ThreadState, config: RunnableConfig) -> dict:
     for tc in tool_calls:
         tool_name = tc["name"]
         tool_args = tc.get("args", {})
+        # Gemini may return args as a JSON string instead of dict
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except (json.JSONDecodeError, TypeError):
+                tool_args = {}
         tool_call_id = tc.get("id", tool_name)
 
         if tool_name in tool_map:
