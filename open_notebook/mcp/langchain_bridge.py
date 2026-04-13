@@ -2,10 +2,16 @@
 Bridge between MCP tools and LangChain tools.
 Converts MCP tool definitions into LangChain-compatible tools that can be
 bound to chat models for tool calling.
+
+For SSE transport, MCP clients maintain persistent connections that require
+a stable event loop. We use a dedicated background thread with its own
+event loop so that sync tool calls from LangChain can reuse the same
+SSE session across multiple invocations.
 """
 
 import asyncio
 import json
+import threading
 from typing import Any, Callable, Dict, List, Optional, Type
 
 from langchain_core.tools import StructuredTool
@@ -17,6 +23,25 @@ from open_notebook.mcp.config import MCPServerConfig, mcp_config_manager
 
 # Cache of MCP clients (keyed by server ID)
 _client_cache: Dict[str, MCPClient] = {}
+
+# Dedicated event loop for MCP async operations (SSE needs persistent connections)
+_mcp_loop: Optional[asyncio.AbstractEventLoop] = None
+_mcp_thread: Optional[threading.Thread] = None
+_mcp_lock = threading.Lock()
+
+
+def _get_mcp_loop() -> asyncio.AbstractEventLoop:
+    """Get or create the dedicated MCP event loop running in a background thread."""
+    global _mcp_loop, _mcp_thread
+    with _mcp_lock:
+        if _mcp_loop is None or _mcp_loop.is_closed():
+            _mcp_loop = asyncio.new_event_loop()
+            _mcp_thread = threading.Thread(
+                target=_mcp_loop.run_forever, daemon=True, name="mcp-event-loop"
+            )
+            _mcp_thread.start()
+            logger.debug("Started dedicated MCP event loop thread")
+    return _mcp_loop
 
 
 def _get_client(config: MCPServerConfig) -> MCPClient:
@@ -78,22 +103,14 @@ def _build_args_model(tool_def: Dict[str, Any]) -> Type[BaseModel]:
 
 
 def _run_async(coro: Any) -> Any:
-    """Run an async coroutine from sync context, handling event loop correctly.
+    """Run an async coroutine on the dedicated MCP event loop.
 
-    For SSE transport, the MCP client has background tasks that need
-    a running event loop. We try to reuse the current loop if available,
-    otherwise create a new one.
+    All MCP operations run on a single background event loop thread so that
+    SSE clients can maintain persistent connections across multiple calls.
     """
-    try:
-        loop = asyncio.get_running_loop()
-        # We're inside an async context — use a thread to avoid deadlock
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(asyncio.run, coro)
-            return future.result(timeout=180)
-    except RuntimeError:
-        # No running loop — safe to use asyncio.run
-        return asyncio.run(coro)
+    loop = _get_mcp_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=180)
 
 
 def _make_tool_func(client: MCPClient, tool_name: str) -> Callable:
@@ -117,15 +134,23 @@ def _make_tool_func(client: MCPClient, tool_name: str) -> Callable:
 
 
 async def discover_server_tools(config: MCPServerConfig) -> List[Dict[str, Any]]:
-    """Discover tools from a single MCP server."""
+    """Discover tools from a single MCP server.
+
+    Runs on the dedicated MCP event loop to reuse SSE sessions.
+    """
     client = _get_client(config)
-    return await client.list_tools()
+    loop = _get_mcp_loop()
+    future = asyncio.run_coroutine_threadsafe(client.list_tools(), loop)
+    return future.result(timeout=120)
 
 
 async def get_mcp_langchain_tools() -> List[StructuredTool]:
     """
     Get all MCP tools from enabled servers as LangChain StructuredTools.
     This is the main entry point for the chat graph to get available tools.
+
+    All MCP operations are dispatched to the dedicated MCP event loop thread
+    so that SSE sessions persist across calls.
     """
     tools: List[StructuredTool] = []
     enabled_servers = mcp_config_manager.get_enabled_servers()
@@ -133,10 +158,13 @@ async def get_mcp_langchain_tools() -> List[StructuredTool]:
     if not enabled_servers:
         return tools
 
+    loop = _get_mcp_loop()
+
     for server_config in enabled_servers:
         try:
             client = _get_client(server_config)
-            mcp_tools = await client.list_tools()
+            future = asyncio.run_coroutine_threadsafe(client.list_tools(), loop)
+            mcp_tools = future.result(timeout=120)
 
             for tool_def in mcp_tools:
                 try:

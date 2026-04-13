@@ -3,6 +3,7 @@ API router for MCP server management.
 CRUD operations for MCP server configurations + tool discovery + connection testing.
 """
 
+import asyncio
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -12,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from open_notebook.mcp.client import MCPClient
 from open_notebook.mcp.config import MCPServerConfig, mcp_config_manager
-from open_notebook.mcp.langchain_bridge import clear_client_cache
+from open_notebook.mcp.langchain_bridge import clear_client_cache, _get_mcp_loop
 
 router = APIRouter()
 
@@ -163,7 +164,9 @@ async def test_connection(server_id: str):
         raise HTTPException(status_code=404, detail="MCP server not found")
 
     client = MCPClient(server)
-    result = await client.test_connection()
+    loop = _get_mcp_loop()
+    future = asyncio.run_coroutine_threadsafe(client.test_connection(), loop)
+    result = future.result(timeout=120)
 
     return MCPConnectionTestResponse(
         status=result.get("status", "unknown"),
@@ -181,7 +184,14 @@ async def list_server_tools(server_id: str):
         raise HTTPException(status_code=404, detail="MCP server not found")
 
     client = MCPClient(server)
-    tools = await client.list_tools()
+    loop = _get_mcp_loop()
+
+    async def _init_and_list():
+        await client.initialize()
+        return await client.list_tools()
+
+    future = asyncio.run_coroutine_threadsafe(_init_and_list(), loop)
+    tools = future.result(timeout=120)
 
     return [
         MCPToolInfo(

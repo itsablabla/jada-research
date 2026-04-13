@@ -5,9 +5,9 @@ Transport detection:
 - First tries Streamable HTTP (POST to URL with JSON-RPC)
 - If that fails, falls back to SSE (GET /sse → POST /messages/?session_id=...)
 
-SSE transport: Each operation opens a fresh SSE stream, gets the session endpoint,
-sends the JSON-RPC request, reads the response from the stream, then closes.
-This avoids the complexity of long-lived SSE connections across async contexts.
+SSE transport: Opens a persistent SSE stream per session. All operations
+(initialize, initialized notification, tools/list, tools/call) go through
+the same SSE session to maintain server-side state.
 """
 
 import asyncio
@@ -29,6 +29,12 @@ class MCPClient:
         self.session_id: Optional[str] = None
         self._initialized = False
         self._transport: Optional[str] = None  # "streamable_http" or "sse"
+        # SSE session state
+        self._sse_client: Optional[httpx.AsyncClient] = None
+        self._sse_response: Optional[httpx.Response] = None
+        self._sse_message_url: Optional[str] = None
+        self._sse_buffer: str = ""
+        self._sse_aiter: Optional[Any] = None
 
     def _make_headers(self, for_sse_get: bool = False) -> Dict[str, str]:
         headers = {}
@@ -49,6 +55,16 @@ class MCPClient:
         if params is not None:
             req["params"] = params
         return req
+
+    def _jsonrpc_notification(self, method: str, params: Optional[Dict] = None) -> Dict:
+        """Create a JSON-RPC notification (no id field)."""
+        notif: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "method": method,
+        }
+        if params is not None:
+            notif["params"] = params
+        return notif
 
     def _parse_response(self, response: httpx.Response) -> Dict[str, Any]:
         """Parse response, handling both JSON and SSE formats."""
@@ -84,89 +100,118 @@ class MCPClient:
                 return url[: -len(suffix)]
         return url.rstrip("/")
 
-    async def _sse_request(self, req: Dict) -> Dict[str, Any]:
-        """Execute a JSON-RPC request over SSE transport.
+    async def _ensure_sse_session(self) -> None:
+        """Open an SSE session if one isn't already open."""
+        if self._sse_message_url and self._sse_client:
+            return  # Already have an active session
 
-        Uses a SINGLE iteration loop over the SSE stream with state transitions:
-        Phase 1: Read until we get the endpoint event
-        Phase 2: POST the request, then continue reading for the response
-        """
+        await self._close_sse()  # Clean up any partial state
+
         base = self._base_url()
         sse_url = f"{base}/sse"
-        req_id = str(req.get("id", ""))
-        is_notification = "id" not in req
+        timeout = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)
 
-        timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
-
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
+        self._sse_client = httpx.AsyncClient(timeout=timeout)
+        self._sse_response = await self._sse_client.send(
+            self._sse_client.build_request(
                 "GET", sse_url, headers=self._make_headers(for_sse_get=True)
-            ) as sse_resp:
-                if sse_resp.status_code != 200:
-                    raise ConnectionError(
-                        f"SSE connection failed: HTTP {sse_resp.status_code}"
-                    )
-
-                message_url = None
-                request_sent = False
-                all_text = ""
-
-                async for chunk in sse_resp.aiter_text():
-                    all_text += chunk
-
-                    # Process all complete lines in the accumulated text
-                    while "\n" in all_text:
-                        line, all_text = all_text.split("\n", 1)
-                        line = line.strip()
-
-                        if not line or line.startswith(":"):
-                            continue
-
-                        if not line.startswith("data:"):
-                            continue
-
-                        data_str = line[5:].strip()
-                        if not data_str:
-                            continue
-
-                        # Phase 1: Looking for the endpoint
-                        if not message_url:
-                            if "/messages/" in data_str:
-                                endpoint_path = data_str.strip()
-                                message_url = f"{base}{endpoint_path}"
-                                logger.debug(
-                                    f"SSE endpoint: {message_url}"
-                                )
-                            continue
-
-                        # Phase 2: Looking for the JSON-RPC response
-                        try:
-                            parsed = json.loads(data_str)
-                            if isinstance(parsed, dict) and (
-                                "result" in parsed or "error" in parsed
-                            ):
-                                if str(parsed.get("id", "")) == req_id:
-                                    return parsed
-                        except json.JSONDecodeError:
-                            continue
-
-                    # After processing lines, send the POST if we have the endpoint
-                    if message_url and not request_sent:
-                        request_sent = True
-                        post_resp = await client.post(
-                            message_url, json=req, headers=self._make_headers()
-                        )
-                        if post_resp.status_code not in (200, 202):
-                            raise ConnectionError(
-                                f"SSE POST failed: HTTP {post_resp.status_code} "
-                                f"{post_resp.text}"
-                            )
-                        if is_notification:
-                            return {}
-
-        raise TimeoutError(
-            f"No SSE response for request {req_id} from '{self.config.name}'"
+            ),
+            stream=True,
         )
+
+        if self._sse_response.status_code != 200:
+            status = self._sse_response.status_code
+            await self._close_sse()
+            raise ConnectionError(f"SSE connection failed: HTTP {status}")
+
+        self._sse_aiter = self._sse_response.aiter_text()
+
+        # Read until we get the endpoint event
+        async for chunk in self._sse_aiter:
+            self._sse_buffer += chunk
+            while "\n" in self._sse_buffer:
+                line, self._sse_buffer = self._sse_buffer.split("\n", 1)
+                line = line.strip()
+                if line.startswith("data:") and "/messages/" in line:
+                    endpoint_path = line[5:].strip()
+                    self._sse_message_url = f"{base}{endpoint_path}"
+                    logger.debug(f"SSE endpoint: {self._sse_message_url}")
+                    return
+
+        await self._close_sse()
+        raise ConnectionError(f"No endpoint event from SSE at {sse_url}")
+
+    async def _sse_post(self, req: Dict) -> None:
+        """POST a JSON-RPC request/notification to the SSE message endpoint."""
+        if not self._sse_client or not self._sse_message_url:
+            raise RuntimeError("No active SSE session")
+
+        resp = await self._sse_client.post(
+            self._sse_message_url, json=req, headers=self._make_headers()
+        )
+        if resp.status_code not in (200, 202):
+            raise ConnectionError(
+                f"SSE POST failed: HTTP {resp.status_code} {resp.text}"
+            )
+
+    async def _sse_read_response(self, req_id: str) -> Dict[str, Any]:
+        """Read from the SSE stream until we get a response matching req_id."""
+        if not self._sse_aiter:
+            raise RuntimeError("No active SSE stream")
+
+        async for chunk in self._sse_aiter:
+            self._sse_buffer += chunk
+            while "\n" in self._sse_buffer:
+                line, self._sse_buffer = self._sse_buffer.split("\n", 1)
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if not data_str:
+                    continue
+                try:
+                    parsed = json.loads(data_str)
+                    if isinstance(parsed, dict) and (
+                        "result" in parsed or "error" in parsed
+                    ):
+                        if str(parsed.get("id", "")) == req_id:
+                            return parsed
+                except json.JSONDecodeError:
+                    continue
+
+        raise TimeoutError(f"SSE stream closed before response for {req_id}")
+
+    async def _sse_request(self, req: Dict) -> Dict[str, Any]:
+        """Send a JSON-RPC request over the persistent SSE session."""
+        await self._ensure_sse_session()
+        req_id = str(req.get("id", ""))
+        await self._sse_post(req)
+        if "id" not in req:
+            return {}  # Notification, no response expected
+        return await self._sse_read_response(req_id)
+
+    async def _sse_notify(self, notif: Dict) -> None:
+        """Send a JSON-RPC notification over the persistent SSE session."""
+        await self._ensure_sse_session()
+        await self._sse_post(notif)
+
+    async def _close_sse(self) -> None:
+        """Close the SSE session and clean up resources."""
+        if self._sse_response:
+            try:
+                await self._sse_response.aclose()
+            except Exception:
+                pass
+            self._sse_response = None
+        if self._sse_client:
+            try:
+                await self._sse_client.aclose()
+            except Exception:
+                pass
+            self._sse_client = None
+        self._sse_message_url = None
+        self._sse_buffer = ""
+        self._sse_aiter = None
 
     async def _post_jsonrpc(self, req: Dict) -> Dict[str, Any]:
         """Send JSON-RPC request using the detected transport."""
@@ -185,8 +230,9 @@ class MCPClient:
     async def initialize(self) -> bool:
         """Perform MCP initialization handshake.
 
-        Tries Streamable HTTP first. If that fails (404, connection error, etc.),
-        falls back to SSE transport and initializes through a fresh SSE session.
+        Tries Streamable HTTP first. If that fails, falls back to SSE.
+        For SSE: opens persistent session, sends initialize, sends initialized
+        notification — all in the same session.
         """
         if self._initialized:
             return True
@@ -211,22 +257,39 @@ class MCPClient:
                         self.session_id = resp.headers["mcp-session-id"]
                     self._transport = "streamable_http"
                     self._initialized = True
-                    logger.info(f"MCP '{self.config.name}' initialized (Streamable HTTP)")
+                    logger.info(
+                        f"MCP '{self.config.name}' initialized (Streamable HTTP)"
+                    )
                     return True
         except Exception as e:
             logger.debug(f"Streamable HTTP failed for '{self.config.name}': {e}")
 
-        # --- Fall back to SSE: initialize in one shot ---
+        # --- Fall back to SSE ---
         try:
+            # Open persistent SSE session
+            await self._ensure_sse_session()
+
+            # Send initialize request
             req = self._jsonrpc_request("initialize", init_params)
             data = await self._sse_request(req)
             server_info = data.get("result", {}).get("serverInfo", {})
+            logger.info(
+                f"MCP '{self.config.name}' init response (SSE). "
+                f"Server: {server_info}"
+            )
+
+            # Send initialized notification (required by MCP protocol)
+            notif = self._jsonrpc_notification("notifications/initialized")
+            await self._sse_notify(notif)
+            logger.debug(f"MCP '{self.config.name}': sent initialized notification")
+
             self._transport = "sse"
             self._initialized = True
-            logger.info(f"MCP '{self.config.name}' initialized (SSE). Server: {server_info}")
             return True
+
         except Exception as e:
             logger.error(f"Failed to initialize MCP '{self.config.name}': {e}")
+            await self._close_sse()
             self._initialized = False
             return False
 
@@ -280,9 +343,11 @@ class MCPClient:
 
     async def test_connection(self) -> Dict[str, Any]:
         """Test connection to the MCP server."""
+        # Reset state for a fresh test
         self._initialized = False
         self.session_id = None
         self._transport = None
+        await self._close_sse()
 
         try:
             success = await self.initialize()
@@ -297,3 +362,7 @@ class MCPClient:
             return {"status": "failed", "error": "Initialization failed"}
         except Exception as e:
             return {"status": "failed", "error": str(e)}
+        finally:
+            # Close SSE session after test to free resources
+            await self._close_sse()
+            self._initialized = False
