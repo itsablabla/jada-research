@@ -169,58 +169,6 @@ class MCPClient:
             f"No SSE response for request {req_id} from '{self.config.name}'"
         )
 
-    async def _detect_transport(self) -> str:
-        """Detect which transport the server supports."""
-        timeout = httpx.Timeout(connect=10.0, read=15.0, write=10.0, pool=10.0)
-
-        # Try Streamable HTTP first
-        try:
-            req = self._jsonrpc_request("initialize", {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {"name": "jada-research", "version": "1.0.0"},
-            })
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    self.config.url, json=req, headers=self._make_headers()
-                )
-                if resp.status_code == 200:
-                    self._parse_response(resp)
-                    if "mcp-session-id" in resp.headers:
-                        self.session_id = resp.headers["mcp-session-id"]
-                    logger.info(f"MCP '{self.config.name}': Streamable HTTP")
-                    self._transport = "streamable_http"
-                    return "streamable_http"
-        except Exception as e:
-            logger.debug(f"Streamable HTTP failed for '{self.config.name}': {e}")
-
-        # Try SSE — just check if /sse endpoint responds
-        try:
-            base = self._base_url()
-            sse_url = f"{base}/sse"
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
-                    "GET", sse_url, headers=self._make_headers(for_sse_get=True)
-                ) as resp:
-                    if resp.status_code == 200:
-                        # Read enough to confirm it's SSE
-                        buffer = ""
-                        async for chunk in resp.aiter_text():
-                            buffer += chunk
-                            if "endpoint" in buffer:
-                                self._transport = "sse"
-                                logger.info(f"MCP '{self.config.name}': SSE transport")
-                                return "sse"
-                            if len(buffer) > 4096:
-                                break
-        except Exception as e:
-            logger.debug(f"SSE detection failed for '{self.config.name}': {e}")
-
-        raise ConnectionError(
-            f"MCP '{self.config.name}' unreachable on both "
-            f"Streamable HTTP ({self.config.url}) and SSE ({self._base_url()}/sse)"
-        )
-
     async def _post_jsonrpc(self, req: Dict) -> Dict[str, Any]:
         """Send JSON-RPC request using the detected transport."""
         if self._transport == "sse":
@@ -236,29 +184,48 @@ class MCPClient:
             return self._parse_response(resp)
 
     async def initialize(self) -> bool:
-        """Perform MCP initialization handshake."""
+        """Perform MCP initialization handshake.
+
+        Tries Streamable HTTP first. If that fails (404, connection error, etc.),
+        falls back to SSE transport and initializes through a fresh SSE session.
+        """
         if self._initialized:
             return True
 
+        init_params = {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "jada-research", "version": "1.0.0"},
+        }
+
+        # --- Try Streamable HTTP ---
         try:
-            transport = await self._detect_transport()
-
-            if transport == "sse":
-                # SSE: send initialize through the SSE channel
-                req = self._jsonrpc_request("initialize", {
-                    "protocolVersion": "2025-03-26",
-                    "capabilities": {},
-                    "clientInfo": {"name": "jada-research", "version": "1.0.0"},
-                })
-                data = await self._sse_request(req)
-                server_info = data.get("result", {}).get("serverInfo", {})
-                logger.info(
-                    f"MCP '{self.config.name}' initialized (SSE). Server: {server_info}"
+            req = self._jsonrpc_request("initialize", init_params)
+            timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    self.config.url, json=req, headers=self._make_headers()
                 )
+                if resp.status_code == 200:
+                    self._parse_response(resp)
+                    if "mcp-session-id" in resp.headers:
+                        self.session_id = resp.headers["mcp-session-id"]
+                    self._transport = "streamable_http"
+                    self._initialized = True
+                    logger.info(f"MCP '{self.config.name}' initialized (Streamable HTTP)")
+                    return True
+        except Exception as e:
+            logger.debug(f"Streamable HTTP failed for '{self.config.name}': {e}")
 
+        # --- Fall back to SSE: initialize in one shot ---
+        try:
+            req = self._jsonrpc_request("initialize", init_params)
+            data = await self._sse_request(req)
+            server_info = data.get("result", {}).get("serverInfo", {})
+            self._transport = "sse"
             self._initialized = True
+            logger.info(f"MCP '{self.config.name}' initialized (SSE). Server: {server_info}")
             return True
-
         except Exception as e:
             logger.error(f"Failed to initialize MCP '{self.config.name}': {e}")
             self._initialized = False
