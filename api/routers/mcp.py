@@ -166,7 +166,7 @@ async def test_connection(server_id: str):
     client = MCPClient(server)
     loop = _get_mcp_loop()
     future = asyncio.run_coroutine_threadsafe(client.test_connection(), loop)
-    result = future.result(timeout=120)
+    result = await asyncio.wrap_future(future)
 
     return MCPConnectionTestResponse(
         status=result.get("status", "unknown"),
@@ -191,7 +191,7 @@ async def list_server_tools(server_id: str):
         return await client.list_tools()
 
     future = asyncio.run_coroutine_threadsafe(_init_and_list(), loop)
-    tools = future.result(timeout=120)
+    tools = await asyncio.wrap_future(future)
 
     return [
         MCPToolInfo(

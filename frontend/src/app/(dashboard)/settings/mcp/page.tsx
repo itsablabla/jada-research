@@ -33,6 +33,8 @@ import {
   useTestMCPConnection,
 } from '@/lib/hooks/use-mcp'
 import { MCPServer, MCPConnectionTestResult } from '@/lib/api/mcp'
+import { useTranslation } from '@/lib/hooks/use-translation'
+import { TranslationKeys } from '@/lib/locales'
 
 // =============================================================================
 // Add/Edit Server Dialog
@@ -42,10 +44,12 @@ function ServerFormDialog({
   open,
   onOpenChange,
   server,
+  t,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   server?: MCPServer | null
+  t: TranslationKeys
 }) {
   const addServer = useAddMCPServer()
   const updateServer = useUpdateMCPServer()
@@ -69,7 +73,7 @@ function ServerFormDialog({
       headers = JSON.parse(headersText)
       setHeadersError(null)
     } catch {
-      setHeadersError('Invalid JSON')
+      setHeadersError(t.mcp.headersInvalid)
       return
     }
 
@@ -97,36 +101,36 @@ function ServerFormDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{isEditing ? 'Edit MCP Server' : 'Add MCP Server'}</DialogTitle>
+          <DialogTitle>{isEditing ? t.mcp.editServer : t.mcp.addServerTitle}</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="server-name">Name</Label>
+            <Label htmlFor="server-name">{t.mcp.name}</Label>
             <input
               id="server-name"
               className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Composio, Garza MCP"
+              placeholder={t.mcp.namePlaceholder}
               disabled={isSubmitting}
             />
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="server-url">URL</Label>
+            <Label htmlFor="server-url">{t.mcp.url}</Label>
             <input
               id="server-url"
               type="url"
               className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://example.com/mcp"
+              placeholder={t.mcp.urlPlaceholder}
               disabled={isSubmitting}
             />
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="server-headers">Headers (JSON)</Label>
+            <Label htmlFor="server-headers">{t.mcp.headers}</Label>
             <textarea
               id="server-headers"
               className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
@@ -135,7 +139,7 @@ function ServerFormDialog({
                 setHeadersText(e.target.value)
                 setHeadersError(null)
               }}
-              placeholder='{"Authorization": "Bearer ..."}'
+              placeholder={t.mcp.headersPlaceholder}
               disabled={isSubmitting}
             />
             {headersError && (
@@ -144,13 +148,13 @@ function ServerFormDialog({
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="server-description">Description (optional)</Label>
+            <Label htmlFor="server-description">{t.mcp.description_label}</Label>
             <input
               id="server-description"
               className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="What tools does this server provide?"
+              placeholder={t.mcp.descriptionPlaceholder}
               disabled={isSubmitting}
             />
           </div>
@@ -164,16 +168,16 @@ function ServerFormDialog({
               className="h-4 w-4 rounded border-input"
               disabled={isSubmitting}
             />
-            <Label htmlFor="server-enabled">Enabled</Label>
+            <Label htmlFor="server-enabled">{t.mcp.enabled}</Label>
           </div>
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
-              Cancel
+              {t.mcp.cancel}
             </Button>
             <Button type="submit" disabled={!isValid || isSubmitting}>
               {isSubmitting && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
-              {isEditing ? 'Save' : 'Add Server'}
+              {isEditing ? t.mcp.save : t.mcp.addServer}
             </Button>
           </DialogFooter>
         </form>
@@ -190,10 +194,12 @@ function ServerCard({
   server,
   onEdit,
   onDelete,
+  t,
 }: {
   server: MCPServer
   onEdit: () => void
   onDelete: () => void
+  t: TranslationKeys
 }) {
   const testConnection = useTestMCPConnection()
   const [testResult, setTestResult] = useState<MCPConnectionTestResult | null>(null)
@@ -213,9 +219,9 @@ function ServerCard({
           <div className="flex items-center gap-2">
             <CardTitle className="text-lg">{server.name}</CardTitle>
             {server.enabled ? (
-              <Badge variant="default" className="bg-green-600">Active</Badge>
+              <Badge variant="default" className="bg-green-600">{t.mcp.active}</Badge>
             ) : (
-              <Badge variant="secondary">Disabled</Badge>
+              <Badge variant="secondary">{t.mcp.disabled}</Badge>
             )}
           </div>
           <div className="flex items-center gap-1">
@@ -247,14 +253,14 @@ function ServerCard({
                 <>
                   <Plug className="h-4 w-4 text-green-600" />
                   <span className="text-sm text-green-600 font-medium">
-                    Connected — {testResult.tool_count} tools available
+                    {t.mcp.connected.replace('{count}', String(testResult.tool_count))}
                   </span>
                 </>
               ) : (
                 <>
                   <Unplug className="h-4 w-4 text-destructive" />
                   <span className="text-sm text-destructive font-medium">
-                    Failed: {testResult.error}
+                    {t.mcp.failed}: {testResult.error}
                   </span>
                 </>
               )}
@@ -267,7 +273,7 @@ function ServerCard({
                   className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
                 >
                   {showTools ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                  {showTools ? 'Hide tools' : `Show ${testResult.tools.length} tools`}
+                  {showTools ? t.mcp.hideTools : t.mcp.showTools.replace('{count}', String(testResult.tools.length))}
                 </button>
                 {showTools && (
                   <div className="mt-2 max-h-48 overflow-y-auto rounded border p-2">
@@ -294,6 +300,7 @@ function ServerCard({
 // =============================================================================
 
 export default function MCPSettingsPage() {
+  const { t } = useTranslation()
   const { data: servers, isLoading, refetch } = useMCPServers()
   const deleteServer = useDeleteMCPServer()
 
@@ -315,21 +322,19 @@ export default function MCPSettingsPage() {
             <div className="flex items-center justify-between mb-6">
               <div className="flex items-center gap-4">
                 <Wrench className="h-6 w-6" />
-                <h1 className="text-2xl font-bold">MCP Tools</h1>
+                <h1 className="text-2xl font-bold">{t.mcp.title}</h1>
                 <Button variant="outline" size="sm" onClick={() => refetch()}>
                   <RefreshCw className="h-4 w-4" />
                 </Button>
               </div>
               <Button onClick={() => setAddDialogOpen(true)}>
                 <Plus className="h-4 w-4 mr-2" />
-                Add Server
+                {t.mcp.addServer}
               </Button>
             </div>
 
             <p className="text-sm text-muted-foreground mb-6">
-              Connect external MCP (Model Context Protocol) servers to give the AI access to
-              external tools during chat conversations. Tools from connected servers are
-              automatically available when chatting in notebooks.
+              {t.mcp.description}
             </p>
 
             {isLoading ? (
@@ -340,14 +345,13 @@ export default function MCPSettingsPage() {
               <Card className="border-dashed">
                 <CardContent className="flex flex-col items-center justify-center py-12 text-center">
                   <Wrench className="h-12 w-12 text-muted-foreground mb-4" />
-                  <h3 className="text-lg font-medium mb-2">No MCP servers configured</h3>
+                  <h3 className="text-lg font-medium mb-2">{t.mcp.noServersConfigured}</h3>
                   <p className="text-sm text-muted-foreground mb-4">
-                    Add an MCP server to give the AI access to external tools like
-                    email, file management, and more.
+                    {t.mcp.noServersDesc}
                   </p>
                   <Button onClick={() => setAddDialogOpen(true)}>
                     <Plus className="h-4 w-4 mr-2" />
-                    Add Your First Server
+                    {t.mcp.addFirstServer}
                   </Button>
                 </CardContent>
               </Card>
@@ -359,6 +363,7 @@ export default function MCPSettingsPage() {
                     server={server}
                     onEdit={() => setEditServer(server)}
                     onDelete={() => setDeleteConfirmId(server.id)}
+                    t={t}
                   />
                 ))}
               </div>
@@ -369,10 +374,12 @@ export default function MCPSettingsPage() {
 
       {/* Add Dialog */}
       <ServerFormDialog
+        key={addDialogOpen ? 'add-open' : 'add-closed'}
         open={addDialogOpen}
         onOpenChange={(open) => {
           setAddDialogOpen(open)
         }}
+        t={t}
       />
 
       {/* Edit Dialog */}
@@ -383,6 +390,7 @@ export default function MCPSettingsPage() {
             if (!open) setEditServer(null)
           }}
           server={editServer}
+          t={t}
         />
       )}
 
@@ -390,14 +398,14 @@ export default function MCPSettingsPage() {
       <Dialog open={!!deleteConfirmId} onOpenChange={(open) => { if (!open) setDeleteConfirmId(null) }}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Delete MCP Server?</DialogTitle>
+            <DialogTitle>{t.mcp.deleteServer}</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            This will remove the server and its tools will no longer be available during chat.
+            {t.mcp.deleteServerDesc}
           </p>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteConfirmId(null)}>
-              Cancel
+              {t.mcp.cancel}
             </Button>
             <Button
               variant="destructive"
@@ -405,7 +413,7 @@ export default function MCPSettingsPage() {
               disabled={deleteServer.isPending}
             >
               {deleteServer.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
-              Delete
+              {t.mcp.delete}
             </Button>
           </DialogFooter>
         </DialogContent>

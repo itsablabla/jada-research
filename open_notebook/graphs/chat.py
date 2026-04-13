@@ -31,6 +31,7 @@ class ThreadState(TypedDict):
     context: Optional[str]
     context_config: Optional[dict]
     model_override: Optional[str]
+    mcp_tools: Optional[list]
 
 
 def _run_async_in_new_loop(coro):
@@ -91,9 +92,20 @@ def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict
 
         ai_message = model.invoke(payload)
 
+        # Gemini returns content as list of dicts — normalize to string
+        if hasattr(ai_message, "content") and isinstance(ai_message.content, list):
+            text_parts = []
+            for part in ai_message.content:
+                if isinstance(part, dict) and "text" in part:
+                    text_parts.append(part["text"])
+                elif isinstance(part, str):
+                    text_parts.append(part)
+            if text_parts:
+                ai_message = ai_message.model_copy(update={"content": "\n".join(text_parts)})
+
         # If the model made tool calls, return the raw message (don't clean yet)
         if hasattr(ai_message, "tool_calls") and ai_message.tool_calls:
-            return {"messages": ai_message}
+            return {"messages": ai_message, "mcp_tools": mcp_tools}
 
         # Clean thinking content from AI response (e.g., <think>...</think> tags)
         content = extract_text_content(ai_message.content)
@@ -120,8 +132,8 @@ def execute_tools(state: ThreadState, config: RunnableConfig) -> dict:
     if not tool_calls:
         return {"messages": []}
 
-    # Build a lookup of available tools
-    mcp_tools = _get_mcp_tools()
+    # Build a lookup of available tools — reuse from state if already fetched
+    mcp_tools = state.get("mcp_tools") or _get_mcp_tools()
     tool_map = {t.name: t for t in mcp_tools}
 
     tool_messages = []

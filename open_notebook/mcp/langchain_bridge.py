@@ -83,14 +83,22 @@ def _json_schema_to_pydantic_field(
 
 
 def _build_args_model(tool_def: Dict[str, Any]) -> Type[BaseModel]:
-    """Build a Pydantic model from an MCP tool's inputSchema."""
+    """Build a Pydantic model from an MCP tool's inputSchema.
+
+    Gemini rejects tool schemas with empty `properties`, so we add a
+    dummy optional parameter when the MCP tool declares no inputs.
+    """
     input_schema = tool_def.get("inputSchema", {})
     properties = input_schema.get("properties", {})
     required_fields = set(input_schema.get("required", []))
 
     if not properties:
-        # No parameters — create an empty model
-        return create_model(f"{tool_def['name']}_Args")
+        # No parameters — create model with a dummy field so Gemini
+        # receives a non-empty properties object in the schema.
+        return create_model(
+            f"{tool_def['name']}_Args",
+            _placeholder=(Optional[str], Field(default=None, description="Unused placeholder")),
+        )
 
     fields = {}
     for prop_name, prop_schema in properties.items():
