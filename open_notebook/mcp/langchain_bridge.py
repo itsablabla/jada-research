@@ -77,18 +77,32 @@ def _build_args_model(tool_def: Dict[str, Any]) -> Type[BaseModel]:
     return create_model(f"{tool_def['name']}_Args", **fields)
 
 
+def _run_async(coro: Any) -> Any:
+    """Run an async coroutine from sync context, handling event loop correctly.
+
+    For SSE transport, the MCP client has background tasks that need
+    a running event loop. We try to reuse the current loop if available,
+    otherwise create a new one.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        # We're inside an async context — use a thread to avoid deadlock
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result(timeout=180)
+    except RuntimeError:
+        # No running loop — safe to use asyncio.run
+        return asyncio.run(coro)
+
+
 def _make_tool_func(client: MCPClient, tool_name: str) -> Callable:
     """Create a callable that invokes an MCP tool."""
 
     def tool_func(**kwargs: Any) -> str:
         """Execute an MCP tool call."""
         try:
-            # Run async call_tool in a new event loop (we're called from sync context)
-            loop = asyncio.new_event_loop()
-            try:
-                result = loop.run_until_complete(client.call_tool(tool_name, kwargs))
-            finally:
-                loop.close()
+            result = _run_async(client.call_tool(tool_name, kwargs))
 
             if isinstance(result, dict) and "error" in result:
                 return f"Error: {result['error']}"
