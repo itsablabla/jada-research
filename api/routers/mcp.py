@@ -18,6 +18,11 @@ from open_notebook.mcp.langchain_bridge import clear_client_cache, _get_mcp_loop
 router = APIRouter()
 
 
+def _mask_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    """Mask header values to avoid exposing secrets in API responses."""
+    return {k: f"****{v[-4:]}" if len(v) > 4 else "****" for k, v in headers.items()}
+
+
 # Request/Response models
 class AddMCPServerRequest(BaseModel):
     name: str = Field(..., description="Human-readable server name")
@@ -70,7 +75,7 @@ async def list_servers():
             id=s.id,
             name=s.name,
             url=s.url,
-            headers=s.headers,
+            headers=_mask_headers(s.headers),
             enabled=s.enabled,
             description=s.description,
         )
@@ -97,7 +102,7 @@ async def add_server(request: AddMCPServerRequest):
             id=result.id,
             name=result.name,
             url=result.url,
-            headers=result.headers,
+            headers=_mask_headers(result.headers),
             enabled=result.enabled,
             description=result.description,
         )
@@ -118,7 +123,7 @@ async def get_server(server_id: str):
         id=server.id,
         name=server.name,
         url=server.url,
-        headers=server.headers,
+        headers=_mask_headers(server.headers),
         enabled=server.enabled,
         description=server.description,
     )
@@ -140,7 +145,7 @@ async def update_server(server_id: str, request: UpdateMCPServerRequest):
         id=result.id,
         name=result.name,
         url=result.url,
-        headers=result.headers,
+        headers=_mask_headers(result.headers),
         enabled=result.enabled,
         description=result.description,
     )

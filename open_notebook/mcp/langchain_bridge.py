@@ -97,7 +97,7 @@ def _build_args_model(tool_def: Dict[str, Any]) -> Type[BaseModel]:
         # receives a non-empty properties object in the schema.
         return create_model(
             f"{tool_def['name']}_Args",
-            _placeholder=(Optional[str], Field(default=None, description="Unused placeholder")),
+            placeholder=(Optional[str], Field(default=None, description="Unused placeholder")),
         )
 
     fields = {}
