@@ -87,8 +87,9 @@ class MCPClient:
     async def _sse_request(self, req: Dict) -> Dict[str, Any]:
         """Execute a JSON-RPC request over SSE transport.
 
-        Opens a fresh SSE stream, gets the session endpoint, POSTs the request,
-        reads the response from the SSE stream, then closes everything.
+        Uses a SINGLE iteration loop over the SSE stream with state transitions:
+        Phase 1: Read until we get the endpoint event
+        Phase 2: POST the request, then continue reading for the response
         """
         base = self._base_url()
         sse_url = f"{base}/sse"
@@ -98,7 +99,6 @@ class MCPClient:
         timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            # Step 1: Open SSE stream and get the message endpoint
             async with client.stream(
                 "GET", sse_url, headers=self._make_headers(for_sse_get=True)
             ) as sse_resp:
@@ -107,63 +107,62 @@ class MCPClient:
                         f"SSE connection failed: HTTP {sse_resp.status_code}"
                     )
 
-                # Read until we get the endpoint event
                 message_url = None
-                buffer = ""
+                request_sent = False
+                all_text = ""
+
                 async for chunk in sse_resp.aiter_text():
-                    buffer += chunk
-                    for line in buffer.split("\n"):
+                    all_text += chunk
+
+                    # Process all complete lines in the accumulated text
+                    while "\n" in all_text:
+                        line, all_text = all_text.split("\n", 1)
                         line = line.strip()
-                        if line.startswith("data:") and "/messages/" in line:
-                            endpoint_path = line[5:].strip()
-                            message_url = f"{base}{endpoint_path}"
-                            break
-                    if message_url:
-                        break
-                    if len(buffer) > 8192:
-                        break
 
-                if not message_url:
-                    raise ConnectionError(
-                        f"No endpoint event from SSE at {sse_url}"
-                    )
+                        if not line or line.startswith(":"):
+                            continue
 
-                logger.debug(f"SSE endpoint for '{self.config.name}': {message_url}")
+                        if not line.startswith("data:"):
+                            continue
 
-                # Step 2: POST the JSON-RPC request to the message endpoint
-                post_resp = await client.post(
-                    message_url, json=req, headers=self._make_headers()
-                )
-                if post_resp.status_code not in (200, 202):
-                    raise ConnectionError(
-                        f"SSE POST failed: HTTP {post_resp.status_code} "
-                        f"{post_resp.text}"
-                    )
+                        data_str = line[5:].strip()
+                        if not data_str:
+                            continue
 
-                if is_notification:
-                    return {}
+                        # Phase 1: Looking for the endpoint
+                        if not message_url:
+                            if "/messages/" in data_str:
+                                endpoint_path = data_str.strip()
+                                message_url = f"{base}{endpoint_path}"
+                                logger.debug(
+                                    f"SSE endpoint: {message_url}"
+                                )
+                            continue
 
-                # Step 3: Read the response from the SSE stream
-                # The response comes as a data: event with matching id
-                response_buffer = ""
-                async for chunk in sse_resp.aiter_text():
-                    response_buffer += chunk
-                    # Check if we have a complete JSON-RPC response
-                    for line in response_buffer.split("\n"):
-                        line = line.strip()
-                        if line.startswith("data:"):
-                            data_str = line[5:].strip()
-                            if data_str:
-                                try:
-                                    parsed = json.loads(data_str)
-                                    if isinstance(parsed, dict) and (
-                                        "result" in parsed or "error" in parsed
-                                    ):
-                                        # Check if it matches our request id
-                                        if str(parsed.get("id", "")) == req_id:
-                                            return parsed
-                                except json.JSONDecodeError:
-                                    continue
+                        # Phase 2: Looking for the JSON-RPC response
+                        try:
+                            parsed = json.loads(data_str)
+                            if isinstance(parsed, dict) and (
+                                "result" in parsed or "error" in parsed
+                            ):
+                                if str(parsed.get("id", "")) == req_id:
+                                    return parsed
+                        except json.JSONDecodeError:
+                            continue
+
+                    # After processing lines, send the POST if we have the endpoint
+                    if message_url and not request_sent:
+                        request_sent = True
+                        post_resp = await client.post(
+                            message_url, json=req, headers=self._make_headers()
+                        )
+                        if post_resp.status_code not in (200, 202):
+                            raise ConnectionError(
+                                f"SSE POST failed: HTTP {post_resp.status_code} "
+                                f"{post_resp.text}"
+                            )
+                        if is_notification:
+                            return {}
 
         raise TimeoutError(
             f"No SSE response for request {req_id} from '{self.config.name}'"
