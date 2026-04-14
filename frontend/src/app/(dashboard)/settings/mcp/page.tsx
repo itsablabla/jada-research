@@ -58,9 +58,7 @@ function ServerFormDialog({
 
   const [name, setName] = useState(server?.name || '')
   const [url, setUrl] = useState(server?.url || '')
-  const [headersText, setHeadersText] = useState(
-    server?.headers && !isEditing ? JSON.stringify(server.headers, null, 2) : '{\n  \n}'
-  )
+  const [headersText, setHeadersText] = useState('{\n  \n}')
   const [headersModified, setHeadersModified] = useState(false)
   const [description, setDescription] = useState(server?.description || '')
   const [enabled, setEnabled] = useState(server?.enabled ?? true)
