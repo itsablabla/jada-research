@@ -1,8 +1,11 @@
 import asyncio
+import json
+import threading
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
 
 def _normalize_content(content: Any) -> str:
@@ -469,6 +472,122 @@ async def execute_chat(request: ExecuteChatRequest):
             f"  Traceback:\n{traceback.format_exc()}"
         )
         raise HTTPException(status_code=500, detail=f"Error executing chat: {str(e)}")
+
+
+@router.post("/chat/execute/stream")
+async def execute_chat_stream(request: ExecuteChatRequest):
+    """Execute a chat request with SSE streaming.
+
+    Sends periodic heartbeat events to keep the connection alive through
+    nginx/proxy timeouts while the LangGraph chat graph processes multi-round
+    tool calling workflows.
+
+    SSE event types:
+    - {"type": "heartbeat"} — keep-alive every 10s
+    - {"type": "complete", "session_id": "...", "messages": [...]} — final result
+    - {"type": "error", "detail": "..."} — error occurred
+    """
+    # Validate session up-front (before starting SSE stream)
+    full_session_id = (
+        request.session_id
+        if request.session_id.startswith("chat_session:")
+        else f"chat_session:{request.session_id}"
+    )
+    session = await ChatSession.get(full_session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    model_override = (
+        request.model_override
+        if request.model_override is not None
+        else getattr(session, "model_override", None)
+    )
+
+    # Prepare state (must be done in async context before handing to thread)
+    current_state = await asyncio.to_thread(
+        chat_graph.get_state,
+        config=RunnableConfig(configurable={"thread_id": full_session_id}),
+    )
+    state_values = current_state.values if current_state else {}
+    state_values["messages"] = state_values.get("messages", [])
+    state_values["context"] = request.context
+    state_values["model_override"] = model_override
+
+    notebook = None
+    if request.notebook_id:
+        try:
+            notebook = await Notebook.get(request.notebook_id)
+        except Exception as e:
+            logger.warning(f"Failed to load notebook {request.notebook_id}: {e}")
+    if notebook:
+        state_values["notebook"] = notebook
+
+    from langchain_core.messages import HumanMessage
+
+    state_values["messages"].append(HumanMessage(content=request.message))
+
+    async def _stream() -> AsyncGenerator[str, None]:
+        result_holder: dict = {"result": None, "error": None}
+
+        def _run_graph():
+            try:
+                result_holder["result"] = chat_graph.invoke(
+                    input=state_values,
+                    config=RunnableConfig(
+                        configurable={
+                            "thread_id": full_session_id,
+                            "model_id": model_override,
+                        }
+                    ),
+                )
+            except Exception as exc:
+                result_holder["error"] = exc
+
+        thread = threading.Thread(target=_run_graph, daemon=True)
+        thread.start()
+
+        # Send heartbeats while the graph is running
+        while thread.is_alive():
+            yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+            # Sleep in small increments so we notice completion quickly
+            for _ in range(20):  # 20 × 0.5s = 10s between heartbeats
+                if not thread.is_alive():
+                    break
+                await asyncio.sleep(0.5)
+
+        thread.join()
+
+        if result_holder["error"]:
+            err = result_holder["error"]
+            logger.error(
+                f"Error executing chat (stream): {err}\n"
+                f"  Session ID: {request.session_id}\n"
+                f"  Traceback:\n{''.join(traceback.format_exception(type(err), err, err.__traceback__))}"
+            )
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(err)})}\n\n"
+            return
+
+        # Save session timestamp
+        try:
+            await session.save()
+        except Exception as e:
+            logger.warning(f"Failed to update session timestamp: {e}")
+
+        # Build message list (same filtering as sync endpoint)
+        messages: list[dict] = []
+        for msg in result_holder["result"].get("messages", []):
+            if not _should_include_message(msg):
+                continue
+            messages.append({
+                "id": getattr(msg, "id", f"msg_{len(messages)}"),
+                "type": msg.type if hasattr(msg, "type") else "unknown",
+                "content": _normalize_content(msg.content) if hasattr(msg, "content") else str(msg),
+                "timestamp": None,
+            })
+
+        yield f"data: {json.dumps({'type': 'complete', 'session_id': request.session_id, 'messages': messages})}\n\n"
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
 @router.post("/chat/context", response_model=BuildContextResponse)
