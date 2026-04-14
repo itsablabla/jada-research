@@ -109,19 +109,12 @@ export function ChatPanel({
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    // Detect platform for correct modifier key
-    const isMac = typeof navigator !== 'undefined' && navigator.userAgent.toUpperCase().indexOf('MAC') >= 0
-    const isModifierPressed = isMac ? e.metaKey : e.ctrlKey
-
-    if (e.key === 'Enter' && isModifierPressed) {
+    // Enter sends message, Shift+Enter adds newline
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
     }
   }
-
-  // Detect platform for placeholder text
-  const isMac = typeof navigator !== 'undefined' && navigator.userAgent.toUpperCase().indexOf('MAC') >= 0
-  const keyHint = isMac ? '⌘+Enter' : 'Ctrl+Enter'
 
   return (
     <>
@@ -298,7 +291,7 @@ export function ChatPanel({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={`${t.chat.sendPlaceholder} (${t.chat.pressToSend.replace('{key}', keyHint)})`}
+              placeholder={`${t.chat.sendPlaceholder} (${t.chat.pressToSend.replace('{key}', 'Enter')})`}
               disabled={isStreaming}
               className="flex-1 min-h-[40px] max-h-[100px] resize-none py-2 px-3 min-w-0"
               rows={1}

@@ -33,6 +33,7 @@ from api.routers import (
     episode_profiles,
     insights,
     languages,
+    mcp,
     models,
     notebooks,
     notes,
@@ -280,6 +281,7 @@ app.include_router(chat.router, prefix="/api", tags=["chat"])
 app.include_router(source_chat.router, prefix="/api", tags=["source-chat"])
 app.include_router(credentials.router, prefix="/api", tags=["credentials"])
 app.include_router(languages.router, prefix="/api", tags=["languages"])
+app.include_router(mcp.router, prefix="/api", tags=["mcp"])
 
 
 @app.get("/")

@@ -1,0 +1,266 @@
+"""
+Bridge between MCP tools and LangChain tools.
+Converts MCP tool definitions into LangChain-compatible tools that can be
+bound to chat models for tool calling.
+
+For SSE transport, MCP clients maintain persistent connections that require
+a stable event loop. We use a dedicated background thread with its own
+event loop so that sync tool calls from LangChain can reuse the same
+SSE session across multiple invocations.
+"""
+
+import asyncio
+import concurrent.futures
+import json
+import threading
+from typing import Any, Callable, Dict, List, Optional, Type
+
+from langchain_core.tools import StructuredTool
+from loguru import logger
+from pydantic import BaseModel, Field, create_model
+
+from open_notebook.mcp.client import MCPClient
+from open_notebook.mcp.config import MCPServerConfig, mcp_config_manager
+
+# Cache of MCP clients (keyed by server ID)
+_client_cache: Dict[str, MCPClient] = {}
+
+# Dedicated event loop for MCP async operations (SSE needs persistent connections)
+_mcp_loop: Optional[asyncio.AbstractEventLoop] = None
+_mcp_thread: Optional[threading.Thread] = None
+_mcp_lock = threading.Lock()
+
+
+def _get_mcp_loop() -> asyncio.AbstractEventLoop:
+    """Get or create the dedicated MCP event loop running in a background thread."""
+    global _mcp_loop, _mcp_thread
+    with _mcp_lock:
+        if _mcp_loop is None or _mcp_loop.is_closed():
+            _mcp_loop = asyncio.new_event_loop()
+            _mcp_thread = threading.Thread(
+                target=_mcp_loop.run_forever, daemon=True, name="mcp-event-loop"
+            )
+            _mcp_thread.start()
+            logger.debug("Started dedicated MCP event loop thread")
+    return _mcp_loop
+
+
+def _get_client(config: MCPServerConfig) -> MCPClient:
+    """Get or create a cached MCP client for a server config."""
+    if config.id not in _client_cache:
+        _client_cache[config.id] = MCPClient(config)
+    return _client_cache[config.id]
+
+
+# Default values used for non-required fields when no explicit default exists.
+# Using concrete defaults instead of None avoids Optional[T] which generates
+# ``anyOf`` in the JSON schema — Gemini rejects ``anyOf`` unions.
+_TYPE_DEFAULTS: Dict[str, Any] = {
+    "string": "",
+    "integer": 0,
+    "number": 0.0,
+    "boolean": False,
+    "array": [],
+    "object": {},
+}
+
+
+def _json_schema_to_pydantic_field(
+    name: str, schema: Dict[str, Any], required: bool
+) -> tuple:
+    """Convert a JSON Schema property to a Pydantic field tuple.
+
+    Important: we intentionally avoid ``Optional[T]`` for non-required fields
+    because Pydantic v2 emits ``anyOf: [{type: T}, {type: null}]`` in the JSON
+    schema, which Gemini's function-calling API rejects with INVALID_ARGUMENT.
+    Instead, non-required fields get a concrete default value of the same type.
+    """
+    field_type: Any = str  # default
+    json_type = schema.get("type", "string")
+
+    if json_type == "string":
+        field_type = str
+    elif json_type == "integer":
+        field_type = int
+    elif json_type == "number":
+        field_type = float
+    elif json_type == "boolean":
+        field_type = bool
+    elif json_type == "array":
+        # Gemini requires ``items`` with a ``type`` on array properties.
+        # Bare ``list`` produces ``items: {}`` which Gemini rejects.
+        # Infer the item type from the schema's ``items`` field if present.
+        items_schema = schema.get("items", {})
+        items_type = items_schema.get("type", "string")
+        if items_type == "integer":
+            field_type = List[int]
+        elif items_type == "number":
+            field_type = List[float]
+        elif items_type == "boolean":
+            field_type = List[bool]
+        else:
+            field_type = List[str]
+    elif json_type == "object":
+        field_type = dict
+    else:
+        field_type = str
+
+    description = schema.get("description", "")
+
+    if required:
+        default = ...
+    else:
+        # Use the schema's own default if present, otherwise fall back to a
+        # concrete zero-value for the type so we never need Optional[T].
+        default = schema.get("default", _TYPE_DEFAULTS.get(json_type, ""))
+
+    return (field_type, Field(default=default, description=description))
+
+
+def _build_args_model(tool_def: Dict[str, Any]) -> Type[BaseModel]:
+    """Build a Pydantic model from an MCP tool's inputSchema.
+
+    Gemini rejects tool schemas with empty `properties`, so we add a
+    dummy optional parameter when the MCP tool declares no inputs.
+    """
+    input_schema = tool_def.get("inputSchema", {})
+    properties = input_schema.get("properties", {})
+    required_fields = set(input_schema.get("required", []))
+
+    if not properties:
+        # No parameters — create model with a dummy field so Gemini
+        # receives a non-empty properties object in the schema.
+        # Use plain ``str`` (not Optional[str]) to avoid ``anyOf`` in schema.
+        return create_model(
+            f"{tool_def['name']}_Args",
+            placeholder=(str, Field(default="", description="Unused placeholder")),
+        )
+
+    fields = {}
+    for prop_name, prop_schema in properties.items():
+        is_required = prop_name in required_fields
+        fields[prop_name] = _json_schema_to_pydantic_field(
+            prop_name, prop_schema, is_required
+        )
+
+    return create_model(f"{tool_def['name']}_Args", **fields)
+
+
+def _run_async(coro: Any, timeout: int = 300) -> Any:
+    """Run an async coroutine on the dedicated MCP event loop.
+
+    All MCP operations run on a single background event loop thread so that
+    SSE clients can maintain persistent connections across multiple calls.
+    """
+    loop = _get_mcp_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=timeout)
+
+
+def _make_tool_func(client: MCPClient, tool_name: str) -> Callable:
+    """Create a callable that invokes an MCP tool."""
+
+    def tool_func(**kwargs: Any) -> str:
+        """Execute an MCP tool call."""
+        try:
+            # Remove the dummy placeholder param so it's not sent to the server
+            kwargs.pop("placeholder", None)
+            result = _run_async(client.call_tool(tool_name, kwargs))
+
+            if isinstance(result, dict) and "error" in result:
+                return f"Error: {result['error']}"
+            if isinstance(result, str):
+                return result
+            return json.dumps(result, default=str)
+        except concurrent.futures.TimeoutError:
+            logger.error(f"MCP tool '{tool_name}' timed out after 300s")
+            return f"Error: Tool '{tool_name}' timed out after 300 seconds. The operation took too long."
+        except Exception as e:
+            error_msg = str(e) or type(e).__name__
+            logger.error(f"MCP tool '{tool_name}' execution failed: {error_msg}")
+            return f"Error executing tool: {error_msg}"
+
+    return tool_func
+
+
+async def discover_server_tools(config: MCPServerConfig) -> List[Dict[str, Any]]:
+    """Discover tools from a single MCP server.
+
+    Runs on the dedicated MCP event loop to reuse SSE sessions.
+    """
+    client = _get_client(config)
+    loop = _get_mcp_loop()
+    future = asyncio.run_coroutine_threadsafe(client.list_tools(), loop)
+    return future.result(timeout=120)
+
+
+async def get_mcp_langchain_tools() -> List[StructuredTool]:
+    """
+    Get all MCP tools from enabled servers as LangChain StructuredTools.
+    This is the main entry point for the chat graph to get available tools.
+
+    All MCP operations are dispatched to the dedicated MCP event loop thread
+    so that SSE sessions persist across calls.
+    """
+    tools: List[StructuredTool] = []
+    enabled_servers = mcp_config_manager.get_enabled_servers()
+
+    if not enabled_servers:
+        return tools
+
+    loop = _get_mcp_loop()
+
+    for server_config in enabled_servers:
+        try:
+            client = _get_client(server_config)
+            future = asyncio.run_coroutine_threadsafe(client.list_tools(), loop)
+            mcp_tools = future.result(timeout=120)
+
+            for tool_def in mcp_tools:
+                try:
+                    name = tool_def.get("name", "unknown")
+                    description = tool_def.get("description", f"MCP tool: {name}")
+                    # Prefix with server name to avoid collisions
+                    prefixed_name = f"{server_config.id}__{name}"
+
+                    args_model = _build_args_model(tool_def)
+                    func = _make_tool_func(client, name)
+
+                    lc_tool = StructuredTool(
+                        name=prefixed_name,
+                        description=f"[{server_config.name}] {description}",
+                        func=func,
+                        args_schema=args_model,
+                    )
+                    tools.append(lc_tool)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to convert MCP tool '{tool_def.get('name')}' "
+                        f"from '{server_config.name}': {e}"
+                    )
+                    continue
+
+            logger.info(
+                f"Loaded {len(mcp_tools)} tools from MCP server '{server_config.name}'"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Failed to load tools from MCP server '{server_config.name}': {e}"
+            )
+            continue
+
+    logger.info(f"Total MCP tools available: {len(tools)}")
+    return tools
+
+
+def clear_client_cache() -> None:
+    """Clear the MCP client cache, closing SSE connections first."""
+    loop = _get_mcp_loop()
+    for client in _client_cache.values():
+        try:
+            future = asyncio.run_coroutine_threadsafe(client._close_sse(), loop)
+            future.result(timeout=5)
+        except Exception as e:
+            logger.debug(f"Error closing MCP client SSE: {e}")
+    _client_cache.clear()

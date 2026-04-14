@@ -41,6 +41,7 @@ import {
   Plus,
   Wrench,
   Command,
+  Plug,
 } from 'lucide-react'
 
 const getNavigation = (t: TranslationKeys) => [
@@ -68,6 +69,7 @@ const getNavigation = (t: TranslationKeys) => [
     items: [
       { name: t.navigation.models, href: '/settings/api-keys', icon: Bot },
       { name: t.navigation.transformations, href: '/transformations', icon: Shuffle },
+      { name: t.navigation.mcpTools, href: '/settings/mcp', icon: Plug },
       { name: t.navigation.settings, href: '/settings', icon: Settings },
       { name: t.navigation.advanced, href: '/advanced', icon: Wrench },
     ],
