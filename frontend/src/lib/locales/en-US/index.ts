@@ -447,7 +447,7 @@ export const enUS = {
     askYourKbDesc: "The LLM will answer your query based on the documents in your knowledge base.",
     question: "Question",
     enterQuestionPlaceholder: "Enter your question...",
-    pressToSubmit: "Press Cmd/Ctrl+Enter to submit",
+    pressToSubmit: "Press Enter to submit",
     noEmbeddingModel: "You can't use this feature because you have no embedding model selected. Please set one up in the Models page.",
     usingCustomModels: "Using Custom Models",
     usingDefaultModels: "Using Default Models",

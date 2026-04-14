@@ -447,7 +447,7 @@ export const frFR = {
     askYourKbDesc: "Le LLM répondra à votre requête en se basant sur les documents de votre base de connaissances.",
     question: "Question",
     enterQuestionPlaceholder: "Entrez votre question...",
-    pressToSubmit: "Appuyez sur Cmd/Ctrl+Entrée pour envoyer",
+    pressToSubmit: "Appuyez sur Entrée pour envoyer",
     noEmbeddingModel: "Vous ne pouvez pas utiliser cette fonctionnalité car aucun modèle d'embedding n'est sélectionné. Veuillez en configurer un dans la page Modèles.",
     usingCustomModels: "Utilisation de modèles personnalisés",
     usingDefaultModels: "Utilisation des modèles par défaut",

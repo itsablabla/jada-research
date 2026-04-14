@@ -447,7 +447,7 @@ export const zhCN = {
     askYourKbDesc: "大语言模型将根据您知识库中的文档回答您的查询。",
     question: "问题",
     enterQuestionPlaceholder: "输入您的问题...",
-    pressToSubmit: "按 Cmd/Ctrl+Enter 提交",
+    pressToSubmit: "按 Enter 提交",
     noEmbeddingModel: "您无法使用此功能，因为尚未选择嵌入模型。请在模型页面设置一个。",
     usingCustomModels: "正在使用自定义模型",
     usingDefaultModels: "正在使用默认模型",

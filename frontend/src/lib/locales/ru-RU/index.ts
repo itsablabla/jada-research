@@ -447,7 +447,7 @@ export const ruRU = {
     askYourKbDesc: "LLM ответит на ваш запрос на основе документов в базе знаний.",
     question: "Вопрос",
     enterQuestionPlaceholder: "Введите ваш вопрос...",
-    pressToSubmit: "Нажмите Cmd/Ctrl+Enter для отправки",
+    pressToSubmit: "Нажмите Enter для отправки",
     noEmbeddingModel: "Вы не можете использовать эту функцию, потому что не выбрана модель эмбеддинга. Настройте её на странице «Модели».",
     usingCustomModels: "Используются пользовательские модели",
     usingDefaultModels: "Используются модели по умолчанию",

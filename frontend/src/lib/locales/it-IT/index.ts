@@ -447,7 +447,7 @@ export const itIT = {
     askYourKbDesc: "L'LLM risponderà alla tua domanda basandosi sui documenti nella tua base di conoscenza.",
     question: "Domanda",
     enterQuestionPlaceholder: "Inserisci la tua domanda...",
-    pressToSubmit: "Premi Cmd/Ctrl+Invio per inviare",
+    pressToSubmit: "Premi Invio per inviare",
     noEmbeddingModel: "Non puoi usare questa funzionalità perché non hai un modello di embedding selezionato. Configurane uno nella pagina modelli.",
     usingCustomModels: "Uso modelli personalizzati",
     usingDefaultModels: "Uso modelli predefiniti",
