@@ -474,7 +474,7 @@ async def stream_source_chat_response(
                 if hasattr(msg, "type") and msg.type == "ai":
                     ai_event = {
                         "type": "ai_message",
-                        "content": msg.content if hasattr(msg, "content") else str(msg),
+                        "content": _normalize_content(msg.content) if hasattr(msg, "content") else str(msg),
                         "timestamp": None,
                     }
                     yield f"data: {json.dumps(ai_event)}\n\n"

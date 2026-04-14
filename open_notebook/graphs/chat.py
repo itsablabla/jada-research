@@ -31,7 +31,6 @@ class ThreadState(TypedDict):
     context: Optional[str]
     context_config: Optional[dict]
     model_override: Optional[str]
-    mcp_tools: Optional[list]
 
 
 def _run_async_in_new_loop(coro):
@@ -85,8 +84,8 @@ def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict
             )
         )
 
-        # Fetch MCP tools once and cache in state for reuse by execute_tools
-        mcp_tools = state.get("mcp_tools") or _get_mcp_tools()
+        # Fetch MCP tools (client-level cache in langchain_bridge handles performance)
+        mcp_tools = _get_mcp_tools()
         if mcp_tools:
             model = model.bind_tools(mcp_tools)
 
@@ -100,13 +99,13 @@ def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict
         if hasattr(ai_message, "tool_calls") and ai_message.tool_calls:
             if normalized_content != raw_content:
                 ai_message = ai_message.model_copy(update={"content": normalized_content})
-            return {"messages": ai_message, "mcp_tools": mcp_tools}
+            return {"messages": ai_message}
 
         # Clean thinking content from AI response (e.g., <think>...</think> tags)
         cleaned_content = clean_thinking_content(normalized_content)
         cleaned_message = ai_message.model_copy(update={"content": cleaned_content})
 
-        return {"messages": cleaned_message, "mcp_tools": mcp_tools}
+        return {"messages": cleaned_message}
     except OpenNotebookError:
         raise
     except Exception as e:
@@ -126,8 +125,8 @@ def execute_tools(state: ThreadState, config: RunnableConfig) -> dict:
     if not tool_calls:
         return {"messages": []}
 
-    # Build a lookup of available tools — reuse from state if already fetched
-    mcp_tools = state.get("mcp_tools") or _get_mcp_tools()
+    # Build a lookup of available tools (client-level cache handles performance)
+    mcp_tools = _get_mcp_tools()
     tool_map = {t.name: t for t in mcp_tools}
 
     tool_messages = []
