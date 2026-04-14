@@ -24,14 +24,14 @@ from open_notebook.utils.error_classifier import classify_error
 from open_notebook.utils.text_utils import extract_text_content
 
 # Maximum number of tool-calling rounds to prevent infinite loops
-MAX_TOOL_ROUNDS = 10
+MAX_TOOL_ROUNDS = 6
 
 # Tool cache to avoid reloading MCP tools on every graph node transition
 _tool_cache: dict = {"tools": None, "notebook_id": None, "timestamp": 0.0}
 _TOOL_CACHE_TTL = 120  # seconds
 
 # Maximum MCP tools to bind to the model per call (keeps prompt manageable)
-MAX_MCP_TOOLS_FOR_MODEL = 40
+MAX_MCP_TOOLS_FOR_MODEL = 20
 
 # Words to ignore when scoring tool relevance
 _STOP_WORDS = frozenset({
@@ -323,8 +323,8 @@ def execute_tools(state: ThreadState, config: RunnableConfig) -> dict:
                 result = tool_map[tool_name].invoke(tool_args)
                 # Truncate very long results to avoid blowing up context
                 result_str = str(result)
-                if len(result_str) > 8000:
-                    result_str = result_str[:8000] + "\n... [truncated]"
+                if len(result_str) > 4000:
+                    result_str = result_str[:4000] + "\n... [truncated]"
                 tool_messages.append(
                     ToolMessage(content=result_str, tool_call_id=tool_call_id)
                 )
