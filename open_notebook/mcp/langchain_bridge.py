@@ -51,10 +51,29 @@ def _get_client(config: MCPServerConfig) -> MCPClient:
     return _client_cache[config.id]
 
 
+# Default values used for non-required fields when no explicit default exists.
+# Using concrete defaults instead of None avoids Optional[T] which generates
+# ``anyOf`` in the JSON schema — Gemini rejects ``anyOf`` unions.
+_TYPE_DEFAULTS: Dict[str, Any] = {
+    "string": "",
+    "integer": 0,
+    "number": 0.0,
+    "boolean": False,
+    "array": [],
+    "object": {},
+}
+
+
 def _json_schema_to_pydantic_field(
     name: str, schema: Dict[str, Any], required: bool
 ) -> tuple:
-    """Convert a JSON Schema property to a Pydantic field tuple."""
+    """Convert a JSON Schema property to a Pydantic field tuple.
+
+    Important: we intentionally avoid ``Optional[T]`` for non-required fields
+    because Pydantic v2 emits ``anyOf: [{type: T}, {type: null}]`` in the JSON
+    schema, which Gemini's function-calling API rejects with INVALID_ARGUMENT.
+    Instead, non-required fields get a concrete default value of the same type.
+    """
     field_type: Any = str  # default
     json_type = schema.get("type", "string")
 
@@ -74,10 +93,13 @@ def _json_schema_to_pydantic_field(
         field_type = str
 
     description = schema.get("description", "")
-    default = ... if required else schema.get("default", None)
 
-    if not required:
-        field_type = Optional[field_type]
+    if required:
+        default = ...
+    else:
+        # Use the schema's own default if present, otherwise fall back to a
+        # concrete zero-value for the type so we never need Optional[T].
+        default = schema.get("default", _TYPE_DEFAULTS.get(json_type, ""))
 
     return (field_type, Field(default=default, description=description))
 
@@ -95,9 +117,10 @@ def _build_args_model(tool_def: Dict[str, Any]) -> Type[BaseModel]:
     if not properties:
         # No parameters — create model with a dummy field so Gemini
         # receives a non-empty properties object in the schema.
+        # Use plain ``str`` (not Optional[str]) to avoid ``anyOf`` in schema.
         return create_model(
             f"{tool_def['name']}_Args",
-            placeholder=(Optional[str], Field(default=None, description="Unused placeholder")),
+            placeholder=(str, Field(default="", description="Unused placeholder")),
         )
 
     fields = {}
