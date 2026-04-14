@@ -86,7 +86,19 @@ def _json_schema_to_pydantic_field(
     elif json_type == "boolean":
         field_type = bool
     elif json_type == "array":
-        field_type = list
+        # Gemini requires ``items`` with a ``type`` on array properties.
+        # Bare ``list`` produces ``items: {}`` which Gemini rejects.
+        # Infer the item type from the schema's ``items`` field if present.
+        items_schema = schema.get("items", {})
+        items_type = items_schema.get("type", "string")
+        if items_type == "integer":
+            field_type = List[int]
+        elif items_type == "number":
+            field_type = List[float]
+        elif items_type == "boolean":
+            field_type = List[bool]
+        else:
+            field_type = List[str]
     elif json_type == "object":
         field_type = dict
     else:
