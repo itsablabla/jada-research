@@ -27,6 +27,31 @@ from langchain_core.runnables import RunnableConfig
 from loguru import logger
 from pydantic import BaseModel, Field
 
+
+def _should_include_message(msg) -> bool:
+    """Filter out tool messages and intermediate AI messages with only tool_calls.
+
+    Only HumanMessages and final AIMessages (with user-facing content) are shown
+    in the frontend chat UI. ToolMessages and AIMessages that only contain
+    tool_calls (no meaningful text) are internal implementation details.
+    """
+    msg_type = msg.type if hasattr(msg, "type") else "unknown"
+
+    # Always skip tool result messages
+    if msg_type == "tool":
+        return False
+
+    # Skip AI messages that have tool_calls but no meaningful content
+    if hasattr(msg, "tool_calls") and msg.tool_calls:
+        content = msg.content if hasattr(msg, "content") else ""
+        normalized = _normalize_content(content).strip() if content else ""
+        # If content is empty or very short (just whitespace/punctuation),
+        # this is an intermediate tool-calling message — skip it
+        if not normalized:
+            return False
+
+    return True
+
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import ChatSession, Note, Notebook, Source
 from open_notebook.exceptions import (
@@ -223,6 +248,8 @@ async def get_session(session_id: str):
         messages: list[ChatMessage] = []
         if thread_state and thread_state.values and "messages" in thread_state.values:
             for msg in thread_state.values["messages"]:
+                if not _should_include_message(msg):
+                    continue
                 messages.append(
                     ChatMessage(
                         id=getattr(msg, "id", f"msg_{len(messages)}"),
@@ -416,9 +443,11 @@ async def execute_chat(request: ExecuteChatRequest):
         # Update session timestamp
         await session.save()
 
-        # Convert messages to response format
+        # Convert messages to response format (filter out tool/intermediate messages)
         messages: list[ChatMessage] = []
         for msg in result.get("messages", []):
+            if not _should_include_message(msg):
+                continue
             messages.append(
                 ChatMessage(
                     id=getattr(msg, "id", f"msg_{len(messages)}"),

@@ -10,6 +10,7 @@ its own workspace.
 
 import asyncio
 import concurrent.futures
+from functools import partial
 from typing import List, Optional
 
 from langchain_core.tools import StructuredTool
@@ -48,23 +49,29 @@ def _run_async(coro):
 class CreateNoteArgs(BaseModel):
     title: str = Field(description="A short descriptive title for the note")
     content: str = Field(description="The full markdown content of the note")
-    notebook_id: str = Field(
-        description="The notebook ID to save the note to (e.g. 'notebook:abc123')"
+    notebook_id: Optional[str] = Field(
+        default=None,
+        description="The notebook ID to save the note to (e.g. 'notebook:abc123'). "
+        "Leave empty to use the current notebook."
     )
 
 
 class AddSourceFromURLArgs(BaseModel):
     url: str = Field(description="The URL to ingest as a new source")
-    notebook_id: str = Field(
-        description="The notebook ID to add the source to (e.g. 'notebook:abc123')"
+    notebook_id: Optional[str] = Field(
+        default=None,
+        description="The notebook ID to add the source to (e.g. 'notebook:abc123'). "
+        "Leave empty to use the current notebook."
     )
 
 
 class AddSourceFromTextArgs(BaseModel):
     title: str = Field(description="Title for the text source")
     text: str = Field(description="The full text content to save as a source")
-    notebook_id: str = Field(
-        description="The notebook ID to add the source to (e.g. 'notebook:abc123')"
+    notebook_id: Optional[str] = Field(
+        default=None,
+        description="The notebook ID to add the source to (e.g. 'notebook:abc123'). "
+        "Leave empty to use the current notebook."
     )
 
 
@@ -211,14 +218,32 @@ def _search_workspace(query: str, max_results: int = 5) -> str:
 # Public API — returns the list of workspace StructuredTools
 # ---------------------------------------------------------------------------
 
+def _with_default_notebook(func, default_notebook_id: str):
+    """Wrap a tool function so notebook_id defaults to default_notebook_id when not provided."""
+    def wrapper(*args, **kwargs):
+        if kwargs.get("notebook_id") is None:
+            kwargs["notebook_id"] = default_notebook_id
+        return func(*args, **kwargs)
+    wrapper.__name__ = func.__name__
+    wrapper.__doc__ = func.__doc__
+    return wrapper
+
+
 def get_workspace_tools(notebook_id: Optional[str] = None) -> List[StructuredTool]:
     """
     Build the list of native workspace tools.
 
     If *notebook_id* is provided, the create/add tools will default to that
-    notebook — but the AI can still override via the tool argument.
+    notebook — the AI doesn't need to specify it explicitly.
     """
     tools: List[StructuredTool] = []
+
+    # Bind notebook_id as default if available
+    create_note_fn = _with_default_notebook(_create_note, notebook_id) if notebook_id else _create_note
+    add_url_fn = _with_default_notebook(_add_source_from_url, notebook_id) if notebook_id else _add_source_from_url
+    add_text_fn = _with_default_notebook(_add_source_from_text, notebook_id) if notebook_id else _add_source_from_text
+
+    nb_hint = f" (defaults to current notebook {notebook_id})" if notebook_id else ""
 
     tools.append(
         StructuredTool(
@@ -227,8 +252,9 @@ def get_workspace_tools(notebook_id: Optional[str] = None) -> List[StructuredToo
                 "[Workspace] Create a new note in the current notebook. "
                 "Use this to save summaries, observations, extracted data, "
                 "or any other text the user wants to keep as a note."
+                f"{nb_hint}"
             ),
-            func=_create_note,
+            func=create_note_fn,
             args_schema=CreateNoteArgs,
         )
     )
@@ -241,8 +267,9 @@ def get_workspace_tools(notebook_id: Optional[str] = None) -> List[StructuredToo
                 "The URL content will be extracted and indexed automatically. "
                 "Use this when the user wants to save a web page, article, or "
                 "online document as a research source."
+                f"{nb_hint}"
             ),
-            func=_add_source_from_url,
+            func=add_url_fn,
             args_schema=AddSourceFromURLArgs,
         )
     )
@@ -255,8 +282,9 @@ def get_workspace_tools(notebook_id: Optional[str] = None) -> List[StructuredToo
                 "Use this when the user provides or you generate text content "
                 "(e.g. email bodies, pasted text, generated reports) that should "
                 "be saved as a searchable source."
+                f"{nb_hint}"
             ),
-            func=_add_source_from_text,
+            func=add_text_fn,
             args_schema=AddSourceFromTextArgs,
         )
     )
