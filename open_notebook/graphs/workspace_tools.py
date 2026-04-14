@@ -56,8 +56,10 @@ def _run_async(coro):
 class CreateNoteArgs(BaseModel):
     title: str = Field(description="A short descriptive title for the note")
     content: str = Field(description="The full markdown content of the note")
-    notebook_id: Optional[str] = Field(
-        default=None,
+    # Use str with default="" instead of Optional[str] to avoid anyOf in JSON
+    # schema which Gemini's function-calling API rejects with INVALID_ARGUMENT.
+    notebook_id: str = Field(
+        default="",
         description="The notebook ID to save the note to (e.g. 'notebook:abc123'). "
         "Leave empty to use the current notebook."
     )
@@ -65,8 +67,8 @@ class CreateNoteArgs(BaseModel):
 
 class AddSourceFromURLArgs(BaseModel):
     url: str = Field(description="The URL to ingest as a new source")
-    notebook_id: Optional[str] = Field(
-        default=None,
+    notebook_id: str = Field(
+        default="",
         description="The notebook ID to add the source to (e.g. 'notebook:abc123'). "
         "Leave empty to use the current notebook."
     )
@@ -75,8 +77,8 @@ class AddSourceFromURLArgs(BaseModel):
 class AddSourceFromTextArgs(BaseModel):
     title: str = Field(description="Title for the text source")
     text: str = Field(description="The full text content to save as a source")
-    notebook_id: Optional[str] = Field(
-        default=None,
+    notebook_id: str = Field(
+        default="",
         description="The notebook ID to add the source to (e.g. 'notebook:abc123'). "
         "Leave empty to use the current notebook."
     )
@@ -277,71 +279,89 @@ def _extract_text_from_email(msg: email.message.Message) -> str:
     return ""
 
 
-def _imap_connect():
-    """Open an IMAP connection using env config."""
+def _imap_connect(timeout: int = 30):
+    """Open an IMAP connection using env config with a socket timeout."""
     cfg = _get_imap_config()
     if not cfg["host"] or not cfg["user"]:
         raise ValueError(
             "IMAP is not configured. Set IMAP_HOST, IMAP_USER, and IMAP_PASSWORD."
         )
     if cfg["use_ssl"]:
-        conn = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
+        conn = imaplib.IMAP4_SSL(cfg["host"], cfg["port"], timeout=timeout)
     else:
-        conn = imaplib.IMAP4(cfg["host"], cfg["port"])
+        conn = imaplib.IMAP4(cfg["host"], cfg["port"], timeout=timeout)
     conn.login(cfg["user"], cfg["password"])
     return conn
 
 
 def _imap_search(query: str, folder: str = "INBOX", max_results: int = 20) -> list:
-    """Search emails via IMAP and return a list of dicts with metadata + body."""
-    conn = _imap_connect()
+    """Fetch recent emails via IMAP and filter client-side by keyword.
+
+    ProtonMail Bridge's server-side SEARCH is extremely slow on large
+    mailboxes (decrypts every message). Instead we fetch the most recent
+    ``scan_count`` messages by sequence number and filter locally.
+    """
+    # Scan more messages than requested so filtering still yields enough.
+    # Keep scan_count modest — each message takes ~0.4s on ProtonMail Bridge.
+    scan_count = min(max(max_results * 2, 30), 50)
+
+    conn = _imap_connect(timeout=120)
     try:
-        conn.select(folder, readonly=True)
-
-        # Build IMAP search criteria
-        # Try BODY search first; fall back to ALL if query is empty
-        if query.strip():
-            # Use OR to search subject, from, and body
-            # IMAP search is limited; we search BODY which includes headers
-            _status, msg_ids_raw = conn.search(None, f'(OR SUBJECT "{query}" BODY "{query}")')
-        else:
-            _status, msg_ids_raw = conn.search(None, "ALL")
-
-        all_ids = msg_ids_raw[0].split()
-        if not all_ids:
+        status, data = conn.select(folder, readonly=True)
+        total = int(data[0])
+        if total == 0:
             return []
 
-        # Take the most recent N emails (IMAP IDs are sequential)
-        selected_ids = all_ids[-max_results:]
-        selected_ids.reverse()  # newest first
+        # Sequence range: fetch the last `scan_count` messages
+        start = max(1, total - scan_count + 1)
+        seq_range = f"{start}:{total}"
 
+        # Fetch headers + body in one call (faster than individual fetches)
+        _status, fetch_data = conn.fetch(seq_range, "(RFC822)")
+
+        # Parse fetched messages
+        raw_messages = []
+        for item in fetch_data:
+            if isinstance(item, tuple) and len(item) == 2:
+                raw_messages.append(item[1])
+
+        query_lower = query.strip().lower()
         results = []
-        for mid in selected_ids:
-            _status, data = conn.fetch(mid, "(RFC822)")
-            if not data or not data[0]:
+
+        # Process newest first
+        for raw_email in reversed(raw_messages):
+            if len(results) >= max_results:
+                break
+            try:
+                msg = email.message_from_bytes(raw_email)
+                subject = _decode_header_value(msg.get("Subject", ""))
+                from_raw = msg.get("From", "")
+                from_name, from_addr = email.utils.parseaddr(from_raw)
+                from_name = _decode_header_value(from_name) or from_addr
+                date_str = msg.get("Date", "")
+                body = _extract_text_from_email(msg)
+
+                # Client-side keyword filter
+                if query_lower:
+                    searchable = f"{subject} {from_name} {from_addr} {body}".lower()
+                    if query_lower not in searchable:
+                        continue
+
+                body_preview = body[:500] + "..." if len(body) > 500 else body
+
+                results.append({
+                    "uid": "0",
+                    "subject": subject,
+                    "from_name": from_name,
+                    "from_email": from_addr,
+                    "date": date_str,
+                    "body_preview": body_preview,
+                    "body_full": body,
+                })
+            except Exception as parse_err:
+                logger.debug(f"Skipping unparseable email: {parse_err}")
                 continue
-            raw_email = data[0][1]
-            msg = email.message_from_bytes(raw_email)
 
-            subject = _decode_header_value(msg.get("Subject", ""))
-            from_raw = msg.get("From", "")
-            from_name, from_addr = email.utils.parseaddr(from_raw)
-            from_name = _decode_header_value(from_name) or from_addr
-            date_str = msg.get("Date", "")
-            body = _extract_text_from_email(msg)
-
-            # Truncate body for preview
-            body_preview = body[:500] + "..." if len(body) > 500 else body
-
-            results.append({
-                "uid": mid.decode(),
-                "subject": subject,
-                "from_name": from_name,
-                "from_email": from_addr,
-                "date": date_str,
-                "body_preview": body_preview,
-                "body_full": body,
-            })
         return results
     finally:
         try:
@@ -353,7 +373,7 @@ def _imap_search(query: str, folder: str = "INBOX", max_results: int = 20) -> li
 class SearchEmailsArgs(BaseModel):
     query: str = Field(description="Search term to find in email subjects and bodies")
     max_results: int = Field(
-        default=20, description="Maximum number of emails to return (newest first)"
+        default=10, description="Maximum number of emails to return (newest first, max 20)"
     )
     folder: str = Field(
         default="INBOX", description="IMAP folder to search (default: INBOX)"
@@ -363,7 +383,7 @@ class SearchEmailsArgs(BaseModel):
 class SearchAndSaveEmailsArgs(BaseModel):
     query: str = Field(description="Search term to find in email subjects and bodies")
     max_results: int = Field(
-        default=20, description="Maximum number of emails to search and save (newest first)"
+        default=10, description="Maximum number of emails to search and save (newest first, max 20)"
     )
     folder: str = Field(
         default="INBOX", description="IMAP folder to search (default: INBOX)"
@@ -372,8 +392,8 @@ class SearchAndSaveEmailsArgs(BaseModel):
         default="source",
         description="How to save: 'source' (searchable source) or 'note' (note)"
     )
-    notebook_id: Optional[str] = Field(
-        default=None,
+    notebook_id: str = Field(
+        default="",
         description="The notebook ID to save emails to. Leave empty for current notebook."
     )
 
@@ -464,7 +484,8 @@ def _search_and_save_emails(
 def _with_default_notebook(func, default_notebook_id: str):
     """Wrap a tool function so notebook_id defaults to default_notebook_id when not provided."""
     def wrapper(*args, **kwargs):
-        if kwargs.get("notebook_id") is None:
+        # Treat both None and empty string as "not provided"
+        if not kwargs.get("notebook_id"):
             kwargs["notebook_id"] = default_notebook_id
         return func(*args, **kwargs)
     wrapper.__name__ = func.__name__
