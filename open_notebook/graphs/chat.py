@@ -70,6 +70,26 @@ def _get_mcp_tools():
         return []
 
 
+def _get_all_tools(notebook_id: Optional[str] = None):
+    """Load all tools: native workspace tools + MCP tools."""
+    tools = []
+
+    # 1. Native workspace tools (always available)
+    try:
+        from open_notebook.graphs.workspace_tools import get_workspace_tools
+        ws_tools = get_workspace_tools(notebook_id=notebook_id)
+        tools.extend(ws_tools)
+        logger.debug(f"Loaded {len(ws_tools)} workspace tools")
+    except Exception as e:
+        logger.warning(f"Failed to load workspace tools: {e}")
+
+    # 2. MCP tools from external servers
+    mcp_tools = _get_mcp_tools()
+    tools.extend(mcp_tools)
+
+    return tools
+
+
 def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict:
     try:
         system_prompt = Prompter(prompt_template="chat/system").render(data=state)  # type: ignore[arg-type]
@@ -84,10 +104,12 @@ def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict
             )
         )
 
-        # Fetch MCP tools (client-level cache in langchain_bridge handles performance)
-        mcp_tools = _get_mcp_tools()
-        if mcp_tools:
-            model = model.bind_tools(mcp_tools)
+        # Fetch all tools: native workspace tools + MCP tools
+        notebook = state.get("notebook")
+        notebook_id = notebook.id if notebook and hasattr(notebook, "id") else None
+        all_tools = _get_all_tools(notebook_id=notebook_id)
+        if all_tools:
+            model = model.bind_tools(all_tools)
 
         ai_message = model.invoke(payload)
 
@@ -125,9 +147,11 @@ def execute_tools(state: ThreadState, config: RunnableConfig) -> dict:
     if not tool_calls:
         return {"messages": []}
 
-    # Build a lookup of available tools (client-level cache handles performance)
-    mcp_tools = _get_mcp_tools()
-    tool_map = {t.name: t for t in mcp_tools}
+    # Build a lookup of available tools (workspace + MCP)
+    notebook = state.get("notebook")
+    notebook_id = notebook.id if notebook and hasattr(notebook, "id") else None
+    all_tools = _get_all_tools(notebook_id=notebook_id)
+    tool_map = {t.name: t for t in all_tools}
 
     tool_messages = []
     for tc in tool_calls:
@@ -152,10 +176,24 @@ def execute_tools(state: ThreadState, config: RunnableConfig) -> dict:
                     ToolMessage(content=result_str, tool_call_id=tool_call_id)
                 )
             except Exception as e:
+                error_str = str(e).lower()
+                # Classify MCP errors for user-friendly messages
+                if "timeout" in error_str or "timed out" in error_str:
+                    friendly = f"The tool '{tool_name}' timed out. The external service may be slow or unavailable. Try again shortly."
+                elif "connection" in error_str or "connect" in error_str:
+                    friendly = f"Could not connect to the service for '{tool_name}'. The server may be down."
+                elif "401" in error_str or "unauthorized" in error_str or "forbidden" in error_str:
+                    friendly = f"Authentication failed for '{tool_name}'. The API credentials may be invalid or expired."
+                elif "rate limit" in error_str or "429" in error_str:
+                    friendly = f"Rate limit reached for '{tool_name}'. Please wait a moment before trying again."
+                elif "validation" in error_str or "invalid" in error_str:
+                    friendly = f"The tool '{tool_name}' received invalid input: {e}"
+                else:
+                    friendly = f"The tool '{tool_name}' encountered an error: {e}"
                 logger.error(f"Tool execution failed for '{tool_name}': {e}")
                 tool_messages.append(
                     ToolMessage(
-                        content=f"Error: {str(e)}", tool_call_id=tool_call_id
+                        content=friendly, tool_call_id=tool_call_id
                     )
                 )
         else:

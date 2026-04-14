@@ -162,6 +162,8 @@ def _make_tool_func(client: MCPClient, tool_name: str) -> Callable:
     def tool_func(**kwargs: Any) -> str:
         """Execute an MCP tool call."""
         try:
+            # Remove the dummy placeholder param so it's not sent to the server
+            kwargs.pop("placeholder", None)
             result = _run_async(client.call_tool(tool_name, kwargs))
 
             if isinstance(result, dict) and "error" in result:
@@ -248,5 +250,12 @@ async def get_mcp_langchain_tools() -> List[StructuredTool]:
 
 
 def clear_client_cache() -> None:
-    """Clear the MCP client cache (e.g. after config changes)."""
+    """Clear the MCP client cache, closing SSE connections first."""
+    loop = _get_mcp_loop()
+    for client in _client_cache.values():
+        try:
+            future = asyncio.run_coroutine_threadsafe(client._close_sse(), loop)
+            future.result(timeout=5)
+        except Exception as e:
+            logger.debug(f"Error closing MCP client SSE: {e}")
     _client_cache.clear()
