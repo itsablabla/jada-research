@@ -221,6 +221,7 @@ export interface SendNotebookChatMessageRequest {
     notes: Array<Record<string, unknown>>
   }
   model_override?: string
+  notebook_id?: string
 }
 
 export interface BuildContextRequest {

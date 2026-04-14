@@ -127,7 +127,7 @@ def _get_all_tools(notebook_id: Optional[str] = None):
         from open_notebook.graphs.workspace_tools import get_workspace_tools
         ws_tools = get_workspace_tools(notebook_id=notebook_id)
         tools.extend(ws_tools)
-        logger.debug(f"Loaded {len(ws_tools)} workspace tools")
+        logger.info(f"Loaded {len(ws_tools)} workspace tools (notebook_id={notebook_id})")
     except Exception as e:
         logger.warning(f"Failed to load workspace tools: {e}")
 
@@ -135,6 +135,7 @@ def _get_all_tools(notebook_id: Optional[str] = None):
     mcp_tools = _get_mcp_tools()
     tools.extend(mcp_tools)
 
+    logger.info(f"Total tools available: {len(tools)} ({len(tools) - len(mcp_tools)} workspace + {len(mcp_tools)} MCP)")
     return tools
 
 

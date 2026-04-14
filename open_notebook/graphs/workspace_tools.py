@@ -81,14 +81,17 @@ class SearchWorkspaceArgs(BaseModel):
 
 def _create_note(title: str, content: str, notebook_id: str) -> str:
     """Create a note in the workspace and link it to a notebook."""
+    logger.info(f"Workspace tool create_note called: title='{title}', notebook_id='{notebook_id}'")
     try:
         from open_notebook.domain.notebook import Note
 
         async def _do():
             note = Note(title=title, content=content, note_type="ai")
             await note.save()
+            logger.info(f"Note saved with id={note.id}")
             if notebook_id:
                 await note.add_to_notebook(notebook_id)
+                logger.info(f"Note {note.id} linked to notebook {notebook_id}")
             return note
 
         note = _run_async(_do())
@@ -99,12 +102,13 @@ def _create_note(title: str, content: str, notebook_id: str) -> str:
             f"- Notebook: {notebook_id}"
         )
     except Exception as e:
-        logger.error(f"Workspace tool create_note failed: {e}")
+        logger.error(f"Workspace tool create_note failed: {e}", exc_info=True)
         return f"Error creating note: {e}"
 
 
 def _add_source_from_url(url: str, notebook_id: str) -> str:
     """Add a URL as a new source and trigger content extraction."""
+    logger.info(f"Workspace tool add_source_from_url called: url='{url}', notebook_id='{notebook_id}'")
     try:
         from open_notebook.domain.notebook import Asset, Source
 
@@ -114,8 +118,10 @@ def _add_source_from_url(url: str, notebook_id: str) -> str:
                 asset=Asset(url=url),
             )
             await source.save()
+            logger.info(f"Source saved with id={source.id}")
             if notebook_id:
                 await source.add_to_notebook(notebook_id)
+                logger.info(f"Source {source.id} linked to notebook {notebook_id}")
             return source
 
         source = _run_async(_do())
@@ -127,20 +133,23 @@ def _add_source_from_url(url: str, notebook_id: str) -> str:
             f"Note: The source text will be available after processing completes."
         )
     except Exception as e:
-        logger.error(f"Workspace tool add_source_from_url failed: {e}")
+        logger.error(f"Workspace tool add_source_from_url failed: {e}", exc_info=True)
         return f"Error adding source from URL: {e}"
 
 
 def _add_source_from_text(title: str, text: str, notebook_id: str) -> str:
     """Add raw text as a new source."""
+    logger.info(f"Workspace tool add_source_from_text called: title='{title}', notebook_id='{notebook_id}'")
     try:
         from open_notebook.domain.notebook import Source
 
         async def _do():
             source = Source(title=title, full_text=text)
             await source.save()
+            logger.info(f"Source saved with id={source.id}")
             if notebook_id:
                 await source.add_to_notebook(notebook_id)
+                logger.info(f"Source {source.id} linked to notebook {notebook_id}")
             # Fire-and-forget vectorization
             try:
                 await source.vectorize()
@@ -156,7 +165,7 @@ def _add_source_from_text(title: str, text: str, notebook_id: str) -> str:
             f"- Notebook: {notebook_id}"
         )
     except Exception as e:
-        logger.error(f"Workspace tool add_source_from_text failed: {e}")
+        logger.error(f"Workspace tool add_source_from_text failed: {e}", exc_info=True)
         return f"Error adding text source: {e}"
 
 

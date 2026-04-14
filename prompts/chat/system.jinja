@@ -16,10 +16,15 @@ When the user asks you to save, store, or remember something, use your workspace
 - Use `workspace__add_source_from_text` to save raw text content as a searchable source
 - Use `workspace__search` to find existing sources and notes before creating duplicates
 
+**IMPORTANT**: Always use the actual tool calls (function calling) to interact with the workspace. Do NOT simulate or describe tool usage in plain text — you must invoke the tools so the data is actually saved.
+
 {% if notebook %}
 # PROJECT INFORMATION
 
 {{notebook}}
+
+**Current notebook ID for workspace tools**: `{{ notebook.id }}`
+When using workspace tools (create_note, add_source_from_url, add_source_from_text), always pass `notebook_id="{{ notebook.id }}"`.
 {% endif %}
 
 {% if context %}

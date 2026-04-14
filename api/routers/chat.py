@@ -90,6 +90,9 @@ class ExecuteChatRequest(BaseModel):
     model_override: Optional[str] = Field(
         None, description="Optional model override for this message"
     )
+    notebook_id: Optional[str] = Field(
+        None, description="Notebook ID for workspace tool context"
+    )
 
 
 class ExecuteChatResponse(BaseModel):
@@ -381,6 +384,17 @@ async def execute_chat(request: ExecuteChatRequest):
         state_values["messages"] = state_values.get("messages", [])
         state_values["context"] = request.context
         state_values["model_override"] = model_override
+
+        # Look up notebook so the system prompt includes PROJECT INFORMATION
+        # and workspace tools get the correct notebook_id
+        notebook = None
+        if request.notebook_id:
+            try:
+                notebook = await Notebook.get(request.notebook_id)
+            except Exception as e:
+                logger.warning(f"Failed to load notebook {request.notebook_id}: {e}")
+        if notebook:
+            state_values["notebook"] = notebook
 
         # Add user message to state
         from langchain_core.messages import HumanMessage
