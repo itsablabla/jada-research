@@ -186,6 +186,11 @@ def _filter_tools_for_model(all_tools: list, message_hint: str) -> list:
                 score += 5  # Name matches are strong signals
             if kw in desc_lower:
                 score += 1
+        # Deprioritize COMPOSIO meta-tools — they cause Pydantic validation
+        # issues and the direct MCP tools (mail_search, drive_list, etc.)
+        # are more reliable.
+        if "composio" in name_lower:
+            score = max(score - 10, 0)
         scored.append((score, tool))
 
     scored.sort(key=lambda x: -x[0])
