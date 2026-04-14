@@ -3,13 +3,20 @@ Native workspace tools for the chat AI.
 
 These LangChain StructuredTools let the chat agent interact with the
 Open Notebook workspace directly — creating notes, adding URL sources,
-and searching existing content.  They are merged with MCP tools in the
-chat graph so the AI can seamlessly use both external services and
-its own workspace.
+searching existing content, and searching emails via IMAP.  They are
+merged with MCP tools in the chat graph so the AI can seamlessly use
+both external services and its own workspace.
 """
 
 import asyncio
 import concurrent.futures
+import email
+import email.header
+import email.utils
+import imaplib
+import os
+import re
+from datetime import datetime, timedelta
 from functools import partial
 from typing import List, Optional
 
@@ -215,6 +222,242 @@ def _search_workspace(query: str, max_results: int = 5) -> str:
 
 
 # ---------------------------------------------------------------------------
+# IMAP Email helpers
+# ---------------------------------------------------------------------------
+
+def _get_imap_config():
+    """Read IMAP connection settings from environment."""
+    return {
+        "host": os.environ.get("IMAP_HOST", ""),
+        "port": int(os.environ.get("IMAP_PORT", "11143")),
+        "user": os.environ.get("IMAP_USER", ""),
+        "password": os.environ.get("IMAP_PASSWORD", ""),
+        "use_ssl": os.environ.get("IMAP_USE_SSL", "false").lower() == "true",
+    }
+
+
+def _decode_header_value(raw: str) -> str:
+    """Decode an RFC-2047 encoded header into a plain string."""
+    if not raw:
+        return ""
+    parts = email.header.decode_header(raw)
+    decoded = []
+    for data, charset in parts:
+        if isinstance(data, bytes):
+            decoded.append(data.decode(charset or "utf-8", errors="replace"))
+        else:
+            decoded.append(data)
+    return " ".join(decoded)
+
+
+def _extract_text_from_email(msg: email.message.Message) -> str:
+    """Extract plain-text body from an email message."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            if ct == "text/plain":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    charset = part.get_content_charset() or "utf-8"
+                    return payload.decode(charset, errors="replace")
+            elif ct == "text/html":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    charset = part.get_content_charset() or "utf-8"
+                    html = payload.decode(charset, errors="replace")
+                    # Strip HTML tags for a rough plain-text conversion
+                    text = re.sub(r"<[^>]+>", " ", html)
+                    text = re.sub(r"\s+", " ", text).strip()
+                    return text
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            return payload.decode(charset, errors="replace")
+    return ""
+
+
+def _imap_connect():
+    """Open an IMAP connection using env config."""
+    cfg = _get_imap_config()
+    if not cfg["host"] or not cfg["user"]:
+        raise ValueError(
+            "IMAP is not configured. Set IMAP_HOST, IMAP_USER, and IMAP_PASSWORD."
+        )
+    if cfg["use_ssl"]:
+        conn = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
+    else:
+        conn = imaplib.IMAP4(cfg["host"], cfg["port"])
+    conn.login(cfg["user"], cfg["password"])
+    return conn
+
+
+def _imap_search(query: str, folder: str = "INBOX", max_results: int = 20) -> list:
+    """Search emails via IMAP and return a list of dicts with metadata + body."""
+    conn = _imap_connect()
+    try:
+        conn.select(folder, readonly=True)
+
+        # Build IMAP search criteria
+        # Try BODY search first; fall back to ALL if query is empty
+        if query.strip():
+            # Use OR to search subject, from, and body
+            # IMAP search is limited; we search BODY which includes headers
+            _status, msg_ids_raw = conn.search(None, f'(OR SUBJECT "{query}" BODY "{query}")')
+        else:
+            _status, msg_ids_raw = conn.search(None, "ALL")
+
+        all_ids = msg_ids_raw[0].split()
+        if not all_ids:
+            return []
+
+        # Take the most recent N emails (IMAP IDs are sequential)
+        selected_ids = all_ids[-max_results:]
+        selected_ids.reverse()  # newest first
+
+        results = []
+        for mid in selected_ids:
+            _status, data = conn.fetch(mid, "(RFC822)")
+            if not data or not data[0]:
+                continue
+            raw_email = data[0][1]
+            msg = email.message_from_bytes(raw_email)
+
+            subject = _decode_header_value(msg.get("Subject", ""))
+            from_raw = msg.get("From", "")
+            from_name, from_addr = email.utils.parseaddr(from_raw)
+            from_name = _decode_header_value(from_name) or from_addr
+            date_str = msg.get("Date", "")
+            body = _extract_text_from_email(msg)
+
+            # Truncate body for preview
+            body_preview = body[:500] + "..." if len(body) > 500 else body
+
+            results.append({
+                "uid": mid.decode(),
+                "subject": subject,
+                "from_name": from_name,
+                "from_email": from_addr,
+                "date": date_str,
+                "body_preview": body_preview,
+                "body_full": body,
+            })
+        return results
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+class SearchEmailsArgs(BaseModel):
+    query: str = Field(description="Search term to find in email subjects and bodies")
+    max_results: int = Field(
+        default=20, description="Maximum number of emails to return (newest first)"
+    )
+    folder: str = Field(
+        default="INBOX", description="IMAP folder to search (default: INBOX)"
+    )
+
+
+class SearchAndSaveEmailsArgs(BaseModel):
+    query: str = Field(description="Search term to find in email subjects and bodies")
+    max_results: int = Field(
+        default=20, description="Maximum number of emails to search and save (newest first)"
+    )
+    folder: str = Field(
+        default="INBOX", description="IMAP folder to search (default: INBOX)"
+    )
+    save_as: str = Field(
+        default="source",
+        description="How to save: 'source' (searchable source) or 'note' (note)"
+    )
+    notebook_id: Optional[str] = Field(
+        default=None,
+        description="The notebook ID to save emails to. Leave empty for current notebook."
+    )
+
+
+def _search_emails(query: str, max_results: int = 20, folder: str = "INBOX") -> str:
+    """Search emails via IMAP and return summaries."""
+    logger.info(f"Workspace tool search_emails called: query='{query}', max_results={max_results}, folder='{folder}'")
+    try:
+        results = _imap_search(query, folder, max_results)
+        if not results:
+            return f"No emails found matching '{query}' in {folder}."
+
+        lines = [f"Found {len(results)} email(s) matching '{query}':\n"]
+        for i, r in enumerate(results, 1):
+            lines.append(
+                f"**{i}. {r['subject']}**\n"
+                f"   From: {r['from_name']} <{r['from_email']}>\n"
+                f"   Date: {r['date']}\n"
+                f"   Preview: {r['body_preview'][:200]}\n"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Workspace tool search_emails failed: {e}", exc_info=True)
+        return f"Error searching emails: {e}"
+
+
+def _search_and_save_emails(
+    query: str,
+    max_results: int = 20,
+    folder: str = "INBOX",
+    save_as: str = "source",
+    notebook_id: str = "",
+) -> str:
+    """Search emails via IMAP and save each one to the notebook."""
+    logger.info(
+        f"Workspace tool search_and_save_emails called: query='{query}', "
+        f"max_results={max_results}, save_as='{save_as}', notebook_id='{notebook_id}'"
+    )
+    try:
+        results = _imap_search(query, folder, max_results)
+        if not results:
+            return f"No emails found matching '{query}' in {folder}."
+
+        saved = []
+        errors = []
+
+        for r in results:
+            title = f"{r['subject']} — from {r['from_name']} ({r['date'][:16]})"
+            content = (
+                f"**From:** {r['from_name']} <{r['from_email']}>\n"
+                f"**Date:** {r['date']}\n"
+                f"**Subject:** {r['subject']}\n\n"
+                f"---\n\n{r['body_full']}"
+            )
+
+            try:
+                if save_as == "note":
+                    result_msg = _create_note(
+                        title=title, content=content, notebook_id=notebook_id
+                    )
+                else:
+                    result_msg = _add_source_from_text(
+                        title=title, text=content, notebook_id=notebook_id
+                    )
+                saved.append(f"- {title}")
+                logger.info(f"Saved email as {save_as}: {title}")
+            except Exception as e:
+                errors.append(f"- {r['subject']}: {e}")
+                logger.error(f"Failed to save email '{r['subject']}': {e}")
+
+        summary = [f"Searched for '{query}' — found {len(results)} emails.\n"]
+        if saved:
+            summary.append(f"**Saved {len(saved)} emails as {save_as}s:**")
+            summary.extend(saved)
+        if errors:
+            summary.append(f"\n**{len(errors)} error(s):**")
+            summary.extend(errors)
+        return "\n".join(summary)
+    except Exception as e:
+        logger.error(f"Workspace tool search_and_save_emails failed: {e}", exc_info=True)
+        return f"Error searching/saving emails: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Public API — returns the list of workspace StructuredTools
 # ---------------------------------------------------------------------------
 
@@ -301,5 +544,46 @@ def get_workspace_tools(notebook_id: Optional[str] = None) -> List[StructuredToo
             args_schema=SearchWorkspaceArgs,
         )
     )
+
+    # Email tools (only available when IMAP is configured)
+    imap_cfg = _get_imap_config()
+    if imap_cfg["host"] and imap_cfg["user"]:
+        tools.append(
+            StructuredTool(
+                name="workspace__search_emails",
+                description=(
+                    "[Email] Search your email inbox via IMAP. Returns email subjects, "
+                    "senders, dates, and body previews. Use this to find emails "
+                    "matching a search term."
+                ),
+                func=_search_emails,
+                args_schema=SearchEmailsArgs,
+            )
+        )
+
+        save_emails_fn = (
+            _with_default_notebook(_search_and_save_emails, notebook_id)
+            if notebook_id
+            else _search_and_save_emails
+        )
+        tools.append(
+            StructuredTool(
+                name="workspace__search_and_save_emails",
+                description=(
+                    "[Email] Search your email inbox and save ALL matching emails "
+                    "to the current notebook in one step. Each email becomes a "
+                    "separate source (or note). This is the preferred tool when "
+                    "the user asks to 'find and save emails' or 'import emails'. "
+                    "Saves happen in bulk — no need to call create_note separately "
+                    "for each email."
+                    f"{nb_hint}"
+                ),
+                func=save_emails_fn,
+                args_schema=SearchAndSaveEmailsArgs,
+            )
+        )
+        logger.info("Email tools enabled (IMAP configured)")
+    else:
+        logger.debug("Email tools disabled (IMAP not configured)")
 
     return tools

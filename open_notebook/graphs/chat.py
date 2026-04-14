@@ -24,7 +24,8 @@ from open_notebook.utils.error_classifier import classify_error
 from open_notebook.utils.text_utils import extract_text_content
 
 # Maximum number of tool-calling rounds to prevent infinite loops
-MAX_TOOL_ROUNDS = 6
+# Raised to 15 to support multi-step workflows (e.g. email search → bulk save)
+MAX_TOOL_ROUNDS = 15
 
 # Tool cache to avoid reloading MCP tools on every graph node transition
 _tool_cache: dict = {"tools": None, "notebook_id": None, "timestamp": 0.0}
