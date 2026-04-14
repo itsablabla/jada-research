@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import json
 import sqlite3
+import time
 from typing import Annotated, Optional
 
 from ai_prompter import Prompter
@@ -23,6 +24,10 @@ from open_notebook.utils.text_utils import extract_text_content
 
 # Maximum number of tool-calling rounds to prevent infinite loops
 MAX_TOOL_ROUNDS = 10
+
+# Tool cache to avoid reloading MCP tools on every graph node transition
+_tool_cache: dict = {"tools": None, "notebook_id": None, "timestamp": 0.0}
+_TOOL_CACHE_TTL = 120  # seconds
 
 
 def _sanitize_tool_messages(messages: list) -> list:
@@ -119,7 +124,22 @@ def _get_mcp_tools():
 
 
 def _get_all_tools(notebook_id: Optional[str] = None):
-    """Load all tools: native workspace tools + MCP tools."""
+    """Load all tools: native workspace tools + MCP tools.
+
+    Results are cached for _TOOL_CACHE_TTL seconds to avoid reconnecting
+    to MCP servers on every graph node transition.
+    """
+    global _tool_cache
+
+    now = time.time()
+    if (
+        _tool_cache["tools"] is not None
+        and _tool_cache["notebook_id"] == notebook_id
+        and (now - _tool_cache["timestamp"]) < _TOOL_CACHE_TTL
+    ):
+        logger.debug(f"Using cached tools ({len(_tool_cache['tools'])} total)")
+        return _tool_cache["tools"]
+
     tools = []
 
     # 1. Native workspace tools (always available)
@@ -136,6 +156,8 @@ def _get_all_tools(notebook_id: Optional[str] = None):
     tools.extend(mcp_tools)
 
     logger.info(f"Total tools available: {len(tools)} ({len(tools) - len(mcp_tools)} workspace + {len(mcp_tools)} MCP)")
+
+    _tool_cache = {"tools": tools, "notebook_id": notebook_id, "timestamp": now}
     return tools
 
 
