@@ -3,7 +3,8 @@ import sqlite3
 from typing import Annotated, Dict, List, Optional
 
 from ai_prompter import Prompter
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from loguru import logger as source_chat_logger
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -128,7 +129,11 @@ def _call_model_with_source_context_inner(
     system_prompt = Prompter(prompt_template="source_chat/system").render(
         data=prompt_data
     )
-    payload = [SystemMessage(content=system_prompt)] + state.get("messages", [])
+    raw_messages = state.get("messages", [])
+    # Import and use the sanitizer from chat module to fix orphaned tool_use messages
+    from open_notebook.graphs.chat import _sanitize_tool_messages
+    sanitized_messages = _sanitize_tool_messages(raw_messages)
+    payload = [SystemMessage(content=system_prompt)] + sanitized_messages
 
     # Handle async model provisioning from sync context
     def run_in_new_loop():

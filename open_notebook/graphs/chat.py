@@ -25,6 +25,54 @@ from open_notebook.utils.text_utils import extract_text_content
 MAX_TOOL_ROUNDS = 10
 
 
+def _sanitize_tool_messages(messages: list) -> list:
+    """Ensure every AIMessage with tool_calls has matching ToolMessages after it.
+
+    Anthropic's API requires that every tool_use block is immediately followed
+    by a tool_result block. Orphaned tool_use messages (from interrupted
+    conversations, timeouts, or errors) will cause a 400 error.
+
+    This function scans the message history and adds synthetic ToolMessages
+    for any tool_calls that lack a corresponding tool_result.
+    """
+    if not messages:
+        return messages
+
+    sanitized = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        sanitized.append(msg)
+
+        # Check if this is an AIMessage with tool_calls
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            tool_call_ids = {tc.get("id") or tc.get("name", f"tc_{j}") for j, tc in enumerate(msg.tool_calls)}
+
+            # Collect tool_result IDs from immediately following ToolMessages
+            found_ids = set()
+            j = i + 1
+            while j < len(messages) and isinstance(messages[j], ToolMessage):
+                found_ids.add(getattr(messages[j], "tool_call_id", None))
+                j += 1
+
+            # Add synthetic ToolMessages for any missing tool_call_ids
+            missing_ids = tool_call_ids - found_ids
+            for missing_id in missing_ids:
+                logger.warning(
+                    f"Adding synthetic tool_result for orphaned tool_call: {missing_id}"
+                )
+                sanitized.append(
+                    ToolMessage(
+                        content="[Tool call was interrupted and did not return a result]",
+                        tool_call_id=missing_id,
+                    )
+                )
+
+        i += 1
+
+    return sanitized
+
+
 class ThreadState(TypedDict):
     messages: Annotated[list, add_messages]
     notebook: Optional[Notebook]
@@ -93,7 +141,11 @@ def _get_all_tools(notebook_id: Optional[str] = None):
 def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict:
     try:
         system_prompt = Prompter(prompt_template="chat/system").render(data=state)  # type: ignore[arg-type]
-        payload = [SystemMessage(content=system_prompt)] + state.get("messages", [])
+        raw_messages = state.get("messages", [])
+        # Sanitize message history to fix orphaned tool_use without tool_result
+        # (Anthropic rejects messages where tool_use lacks matching tool_result)
+        sanitized_messages = _sanitize_tool_messages(raw_messages)
+        payload = [SystemMessage(content=system_prompt)] + sanitized_messages
         model_id = config.get("configurable", {}).get("model_id") or state.get(
             "model_override"
         )
