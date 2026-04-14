@@ -59,8 +59,9 @@ function ServerFormDialog({
   const [name, setName] = useState(server?.name || '')
   const [url, setUrl] = useState(server?.url || '')
   const [headersText, setHeadersText] = useState(
-    server?.headers ? JSON.stringify(server.headers, null, 2) : '{\n  \n}'
+    server?.headers && !isEditing ? JSON.stringify(server.headers, null, 2) : '{\n  \n}'
   )
+  const [headersModified, setHeadersModified] = useState(false)
   const [description, setDescription] = useState(server?.description || '')
   const [enabled, setEnabled] = useState(server?.enabled ?? true)
   const [headersError, setHeadersError] = useState<string | null>(null)
@@ -80,10 +81,14 @@ function ServerFormDialog({
     const onSuccess = () => onOpenChange(false)
 
     if (isEditing && server) {
+      const updateData: Record<string, unknown> = { name, url, description: description || undefined, enabled }
+      if (headersModified && headersText.trim() !== '' && headersText.trim() !== '{\n  \n}') {
+        updateData.headers = headers
+      }
       updateServer.mutate(
         {
           serverId: server.id,
-          data: { name, url, headers, description: description || undefined, enabled },
+          data: updateData,
         },
         { onSuccess }
       )
@@ -137,9 +142,10 @@ function ServerFormDialog({
               value={headersText}
               onChange={(e) => {
                 setHeadersText(e.target.value)
+                setHeadersModified(true)
                 setHeadersError(null)
               }}
-              placeholder={t.mcp.headersPlaceholder}
+              placeholder={isEditing ? t.mcp.headersKeepExisting : t.mcp.headersPlaceholder}
               disabled={isSubmitting}
             />
             {headersError && (

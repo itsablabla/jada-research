@@ -932,6 +932,7 @@ export const ptBR = {
     urlPlaceholder: "https://example.com/mcp",
     headers: "Cabeçalhos (JSON)",
     headersPlaceholder: "{\"Authorization\": \"Bearer ...\"}",
+    headersKeepExisting: "Deixe vazio para manter os cabeçalhos existentes",
     headersInvalid: "JSON inválido",
     description_label: "Descrição (opcional)",
     descriptionPlaceholder: "Quais ferramentas este servidor fornece?",

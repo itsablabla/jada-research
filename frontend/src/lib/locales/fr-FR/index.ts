@@ -932,6 +932,7 @@ export const frFR = {
     urlPlaceholder: "https://example.com/mcp",
     headers: "En-têtes (JSON)",
     headersPlaceholder: "{\"Authorization\": \"Bearer ...\"}",
+    headersKeepExisting: "Laisser vide pour conserver les en-têtes existants",
     headersInvalid: "JSON invalide",
     description_label: "Description (facultatif)",
     descriptionPlaceholder: "Quels outils ce serveur fournit-il ?",

@@ -932,6 +932,7 @@ export const zhCN = {
     urlPlaceholder: "https://example.com/mcp",
     headers: "请求头 (JSON)",
     headersPlaceholder: "{\"Authorization\": \"Bearer ...\"}",
+    headersKeepExisting: "留空以保留现有标头",
     headersInvalid: "无效的 JSON",
     description_label: "描述（可选）",
     descriptionPlaceholder: "此服务器提供哪些工具？",

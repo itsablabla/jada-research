@@ -932,6 +932,7 @@ export const ruRU = {
     urlPlaceholder: "https://example.com/mcp",
     headers: "Заголовки (JSON)",
     headersPlaceholder: "{\"Authorization\": \"Bearer ...\"}",
+    headersKeepExisting: "Оставьте пустым, чтобы сохранить существующие заголовки",
     headersInvalid: "Некорректный JSON",
     description_label: "Описание (необязательно)",
     descriptionPlaceholder: "Какие инструменты предоставляет этот сервер?",

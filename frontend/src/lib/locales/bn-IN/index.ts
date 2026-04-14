@@ -933,6 +933,7 @@ export const bnIN = {
     urlPlaceholder: "https://example.com/mcp",
     headers: "হেডার (JSON)",
     headersPlaceholder: "{\"Authorization\": \"Bearer ...\"}",
+    headersKeepExisting: "বিদ্যমান হেডার রাখতে খালি রাখুন",
     headersInvalid: "অবৈধ JSON",
     description_label: "বিবরণ (ঐচ্ছিক)",
     descriptionPlaceholder: "এই সার্ভারটি কোন টুলগুলি প্রদান করে?",

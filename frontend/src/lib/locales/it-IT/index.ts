@@ -932,6 +932,7 @@ export const itIT = {
     urlPlaceholder: "https://example.com/mcp",
     headers: "Intestazioni (JSON)",
     headersPlaceholder: "{\"Authorization\": \"Bearer ...\"}",
+    headersKeepExisting: "Lascia vuoto per mantenere le intestazioni esistenti",
     headersInvalid: "JSON non valido",
     description_label: "Descrizione (opzionale)",
     descriptionPlaceholder: "Quali strumenti fornisce questo server?",

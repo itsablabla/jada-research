@@ -933,6 +933,7 @@ export const enUS = {
     urlPlaceholder: "https://example.com/mcp",
     headers: "Headers (JSON)",
     headersPlaceholder: "{\"Authorization\": \"Bearer ...\"}",
+    headersKeepExisting: "Leave empty to keep existing headers",
     headersInvalid: "Invalid JSON",
     description_label: "Description (optional)",
     descriptionPlaceholder: "What tools does this server provide?",

@@ -180,8 +180,13 @@ def should_continue(state: ThreadState) -> str:
 
     # If the last message has tool calls, execute them
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        # Safety: count how many tool rounds we've done
-        tool_msg_count = sum(1 for m in messages if hasattr(m, 'tool_calls') and m.tool_calls)
+        # Safety: count tool rounds since last human message only
+        last_human_idx = max(
+            (i for i, m in enumerate(messages) if getattr(m, 'type', None) == 'human'),
+            default=0,
+        )
+        current_exchange = messages[last_human_idx:]
+        tool_msg_count = sum(1 for m in current_exchange if hasattr(m, 'tool_calls') and m.tool_calls)
         if tool_msg_count >= MAX_TOOL_ROUNDS:
             logger.warning("Max tool rounds reached, stopping")
             return END

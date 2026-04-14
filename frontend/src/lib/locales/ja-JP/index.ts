@@ -932,6 +932,7 @@ export const jaJP = {
     urlPlaceholder: "https://example.com/mcp",
     headers: "ヘッダー (JSON)",
     headersPlaceholder: "{\"Authorization\": \"Bearer ...\"}",
+    headersKeepExisting: "既存のヘッダーを保持するには空のままにしてください",
     headersInvalid: "無効なJSON",
     description_label: "説明（任意）",
     descriptionPlaceholder: "このサーバーはどのようなツールを提供しますか？",

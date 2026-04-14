@@ -932,6 +932,7 @@ export const zhTW = {
     urlPlaceholder: "https://example.com/mcp",
     headers: "標頭 (JSON)",
     headersPlaceholder: "{\"Authorization\": \"Bearer ...\"}",
+    headersKeepExisting: "留空以保留現有標頭",
     headersInvalid: "無效的 JSON",
     description_label: "描述（選填）",
     descriptionPlaceholder: "此伺服器提供哪些工具？",
