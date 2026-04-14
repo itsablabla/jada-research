@@ -1,9 +1,10 @@
 import asyncio
 import concurrent.futures
 import json
+import re
 import sqlite3
 import time
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional
 
 from ai_prompter import Prompter
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -28,6 +29,23 @@ MAX_TOOL_ROUNDS = 10
 # Tool cache to avoid reloading MCP tools on every graph node transition
 _tool_cache: dict = {"tools": None, "notebook_id": None, "timestamp": 0.0}
 _TOOL_CACHE_TTL = 120  # seconds
+
+# Maximum MCP tools to bind to the model per call (keeps prompt manageable)
+MAX_MCP_TOOLS_FOR_MODEL = 40
+
+# Words to ignore when scoring tool relevance
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+    "has", "have", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "can", "shall", "not", "no", "if", "then",
+    "than", "that", "this", "these", "those", "it", "its", "my", "your",
+    "our", "their", "his", "her", "me", "him", "them", "us", "we", "you",
+    "i", "what", "which", "who", "whom", "how", "when", "where", "why",
+    "all", "each", "every", "any", "some", "most", "other", "more",
+    "about", "up", "out", "so", "just", "also", "very", "as",
+    "using", "use", "find", "get", "make", "please", "want", "need",
+})
 
 
 def _sanitize_tool_messages(messages: list) -> list:
@@ -123,7 +141,64 @@ def _get_mcp_tools():
         return []
 
 
-def _get_all_tools(notebook_id: Optional[str] = None):
+def _extract_keywords(text: str) -> set:
+    """Extract meaningful keywords from text, ignoring stop words."""
+    words = set(re.findall(r'\b[a-z]{2,}\b', text.lower()))
+    return words - _STOP_WORDS
+
+
+def _get_last_human_message(messages: list) -> str:
+    """Get the text content of the last human message."""
+    for msg in reversed(messages):
+        if getattr(msg, 'type', None) == 'human':
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            return content
+    return ""
+
+
+def _filter_tools_for_model(all_tools: list, message_hint: str) -> list:
+    """Filter tools by relevance to the user's message.
+
+    Always includes all workspace tools. Scores MCP tools by keyword
+    overlap with tool name and description, returns top N most relevant.
+    This keeps the LLM prompt manageable (~40 tools vs 189).
+    """
+    ws_tools = [t for t in all_tools if t.name.startswith("workspace__")]
+    mcp_tools = [t for t in all_tools if not t.name.startswith("workspace__")]
+
+    if len(mcp_tools) <= MAX_MCP_TOOLS_FOR_MODEL:
+        return all_tools  # Few enough already
+
+    if not message_hint:
+        return ws_tools + mcp_tools[:MAX_MCP_TOOLS_FOR_MODEL]
+
+    keywords = _extract_keywords(message_hint)
+    if not keywords:
+        return ws_tools + mcp_tools[:MAX_MCP_TOOLS_FOR_MODEL]
+
+    scored: List[tuple] = []
+    for tool in mcp_tools:
+        name_lower = tool.name.lower().replace("__", " ").replace("_", " ")
+        desc_lower = (tool.description or "").lower()
+        score = 0
+        for kw in keywords:
+            if kw in name_lower:
+                score += 5  # Name matches are strong signals
+            if kw in desc_lower:
+                score += 1
+        scored.append((score, tool))
+
+    scored.sort(key=lambda x: -x[0])
+    filtered = [t for _, t in scored[:MAX_MCP_TOOLS_FOR_MODEL]]
+
+    logger.info(
+        f"Filtered {len(mcp_tools)} MCP tools to {len(filtered)} "
+        f"(keywords: {', '.join(sorted(list(keywords)[:10]))})"
+    )
+    return ws_tools + filtered
+
+
+def _load_all_tools(notebook_id: Optional[str] = None):
     """Load all tools: native workspace tools + MCP tools.
 
     Results are cached for _TOOL_CACHE_TTL seconds to avoid reconnecting
@@ -179,12 +254,14 @@ def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict
             )
         )
 
-        # Fetch all tools: native workspace tools + MCP tools
+        # Fetch tools: load all (cached), then filter by relevance to message
         notebook = state.get("notebook")
         notebook_id = notebook.id if notebook and hasattr(notebook, "id") else None
-        all_tools = _get_all_tools(notebook_id=notebook_id)
-        if all_tools:
-            model = model.bind_tools(all_tools)
+        all_tools = _load_all_tools(notebook_id=notebook_id)
+        message_hint = _get_last_human_message(raw_messages)
+        filtered_tools = _filter_tools_for_model(all_tools, message_hint)
+        if filtered_tools:
+            model = model.bind_tools(filtered_tools)
 
         ai_message = model.invoke(payload)
 
@@ -222,10 +299,11 @@ def execute_tools(state: ThreadState, config: RunnableConfig) -> dict:
     if not tool_calls:
         return {"messages": []}
 
-    # Build a lookup of available tools (workspace + MCP)
+    # Build a lookup from the FULL tool set (not filtered) so any tool the
+    # model was bound with can be executed even across filter boundaries.
     notebook = state.get("notebook")
     notebook_id = notebook.id if notebook and hasattr(notebook, "id") else None
-    all_tools = _get_all_tools(notebook_id=notebook_id)
+    all_tools = _load_all_tools(notebook_id=notebook_id)
     tool_map = {t.name: t for t in all_tools}
 
     tool_messages = []
