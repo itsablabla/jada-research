@@ -16,6 +16,7 @@ import email.utils
 import imaplib
 import os
 import re
+import ssl
 from datetime import datetime, timedelta
 from functools import partial
 from typing import List, Optional
@@ -235,6 +236,7 @@ def _get_imap_config():
         "user": os.environ.get("IMAP_USER", ""),
         "password": os.environ.get("IMAP_PASSWORD", ""),
         "use_ssl": os.environ.get("IMAP_USE_SSL", "false").lower() == "true",
+        "use_starttls": os.environ.get("IMAP_USE_STARTTLS", "true").lower() == "true",
     }
 
 
@@ -280,7 +282,15 @@ def _extract_text_from_email(msg: email.message.Message) -> str:
 
 
 def _imap_connect(timeout: int = 30):
-    """Open an IMAP connection using env config with a socket timeout."""
+    """Open an IMAP connection using env config with a socket timeout.
+
+    Supports three TLS modes (checked in order):
+    1. ``IMAP_USE_SSL=true``  → connect via ``IMAP4_SSL`` (implicit TLS)
+    2. ``IMAP_USE_STARTTLS=true`` (default) → plain connect then STARTTLS upgrade
+    3. Both false → plain-text (not recommended)
+
+    ProtonMail Bridge requires STARTTLS on its non-SSL IMAP port.
+    """
     cfg = _get_imap_config()
     if not cfg["host"] or not cfg["user"]:
         raise ValueError(
@@ -290,6 +300,12 @@ def _imap_connect(timeout: int = 30):
         conn = imaplib.IMAP4_SSL(cfg["host"], cfg["port"], timeout=timeout)
     else:
         conn = imaplib.IMAP4(cfg["host"], cfg["port"], timeout=timeout)
+        if cfg["use_starttls"]:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            conn.starttls(ssl_context=ctx)
+            logger.debug("IMAP STARTTLS upgrade successful")
     conn.login(cfg["user"], cfg["password"])
     return conn
 
