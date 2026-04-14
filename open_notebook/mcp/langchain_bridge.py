@@ -10,6 +10,7 @@ SSE session across multiple invocations.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import threading
 from typing import Any, Callable, Dict, List, Optional, Type
@@ -145,7 +146,7 @@ def _build_args_model(tool_def: Dict[str, Any]) -> Type[BaseModel]:
     return create_model(f"{tool_def['name']}_Args", **fields)
 
 
-def _run_async(coro: Any) -> Any:
+def _run_async(coro: Any, timeout: int = 300) -> Any:
     """Run an async coroutine on the dedicated MCP event loop.
 
     All MCP operations run on a single background event loop thread so that
@@ -153,7 +154,7 @@ def _run_async(coro: Any) -> Any:
     """
     loop = _get_mcp_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=180)
+    return future.result(timeout=timeout)
 
 
 def _make_tool_func(client: MCPClient, tool_name: str) -> Callable:
@@ -171,9 +172,13 @@ def _make_tool_func(client: MCPClient, tool_name: str) -> Callable:
             if isinstance(result, str):
                 return result
             return json.dumps(result, default=str)
+        except concurrent.futures.TimeoutError:
+            logger.error(f"MCP tool '{tool_name}' timed out after 300s")
+            return f"Error: Tool '{tool_name}' timed out after 300 seconds. The operation took too long."
         except Exception as e:
-            logger.error(f"MCP tool '{tool_name}' execution failed: {e}")
-            return f"Error executing tool: {e}"
+            error_msg = str(e) or type(e).__name__
+            logger.error(f"MCP tool '{tool_name}' execution failed: {error_msg}")
+            return f"Error executing tool: {error_msg}"
 
     return tool_func
 
