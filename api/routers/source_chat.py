@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, List, Optional
 
 from fastapi import APIRouter, HTTPException, Path
 from fastapi.responses import StreamingResponse
@@ -8,6 +8,26 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from loguru import logger
 from pydantic import BaseModel, Field
+
+
+def _normalize_content(content: Any) -> str:
+    """Normalize message content to a plain string.
+
+    Gemini returns content as a list of dicts (e.g. [{'text': '...', 'type': 'direct'}])
+    instead of a plain string. This helper extracts the text.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
+        if parts:
+            return "\n".join(parts)
+    return str(content)
 
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import ChatSession, Source
@@ -251,7 +271,7 @@ async def get_source_chat_session(
                         ChatMessage(
                             id=getattr(msg, "id", f"msg_{len(messages)}"),
                             type=msg.type if hasattr(msg, "type") else "unknown",
-                            content=msg.content
+                            content=_normalize_content(msg.content)
                             if hasattr(msg, "content")
                             else str(msg),
                             timestamp=None,  # LangChain messages don't have timestamps by default
